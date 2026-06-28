@@ -64,6 +64,51 @@ func TestViewWriteEdit(t *testing.T) {
 	}
 }
 
+func TestShellRunArchivesLargeOutputBeforeToolTruncation(t *testing.T) {
+	if os.Getenv("WHALE_SHELL_LARGE_OUTPUT_HELPER") == "1" {
+		fmt.Print(strings.Repeat("x", 50000))
+		return
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("helper command uses POSIX shell syntax")
+	}
+	root := t.TempDir()
+	archiveDir := filepath.Join(root, ".whale", "tool-results")
+	ts, err := NewToolset(root)
+	if err != nil {
+		t.Fatalf("new toolset: %v", err)
+	}
+	registry := core.NewToolRegistry(ts.Tools())
+	ctx := core.WithToolResultArchive(context.Background(), archiveDir, "session-1")
+	command := fmt.Sprintf("WHALE_SHELL_LARGE_OUTPUT_HELPER=1 %s -test.run '^TestShellRunArchivesLargeOutputBeforeToolTruncation$' --", shellSingleQuote(os.Args[0]))
+
+	res, err := registry.Dispatch(ctx, core.ToolCall{
+		ID:    "call-large-shell",
+		Name:  "shell_run",
+		Input: fmt.Sprintf(`{"command":%q,"yield_time_ms":30000}`, command),
+	})
+	if err != nil {
+		t.Fatalf("dispatch shell_run: %v", err)
+	}
+	path, _ := res.Metadata["full_result_path"].(string)
+	if path == "" {
+		t.Fatalf("missing full_result_path metadata: %+v\n%s", res.Metadata, res.ModelText)
+	}
+	if !strings.HasPrefix(path, filepath.Join(archiveDir, "session-1")) {
+		t.Fatalf("archive path not scoped to session dir: %q", path)
+	}
+	if !strings.Contains(res.ModelText, "Full output saved to: "+path) {
+		t.Fatalf("model text missing archive marker for %q:\n%s", path, res.ModelText)
+	}
+	full, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read archived shell output: %v", err)
+	}
+	if len(full) < 50000 || !strings.Contains(string(full), strings.Repeat("x", 50000)) {
+		t.Fatalf("archive did not preserve full shell output, bytes=%d", len(full))
+	}
+}
+
 func TestReadFileNormalizesCRLFContent(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("zero\r\none\r\ntwo\r\n"), 0o644); err != nil {

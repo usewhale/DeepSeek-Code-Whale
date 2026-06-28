@@ -118,17 +118,17 @@ func (b *Toolset) shellRun(ctx context.Context, call core.ToolCall) (core.ToolRe
 		snap := task.snapshot()
 		if snap.Status != "running" {
 			b.tasks.release(task.ID)
-			return shellRunForegroundFinalResult(call, snap, requestedMaxRuntimeMS, effectiveMaxRuntimeMS, warnings)
+			return shellRunForegroundFinalResult(ctx, call, snap, requestedMaxRuntimeMS, effectiveMaxRuntimeMS, warnings)
 		}
 		return marshalToolResult(call, shellRunBackgroundedResult(snap, requestedYieldMS, effectiveYieldMS, requestedMaxRuntimeMS, effectiveMaxRuntimeMS, warnings, shellYieldInterruptedDiagnosis(shellPol)))
 	case <-task.done:
 		snap := task.snapshot()
 		b.tasks.release(task.ID)
-		return shellRunForegroundFinalResult(call, snap, requestedMaxRuntimeMS, effectiveMaxRuntimeMS, warnings)
+		return shellRunForegroundFinalResult(ctx, call, snap, requestedMaxRuntimeMS, effectiveMaxRuntimeMS, warnings)
 	case <-timer.C:
 		if snap := task.snapshot(); snap.Status != "running" {
 			b.tasks.release(task.ID)
-			return shellRunForegroundFinalResult(call, snap, requestedMaxRuntimeMS, effectiveMaxRuntimeMS, warnings)
+			return shellRunForegroundFinalResult(ctx, call, snap, requestedMaxRuntimeMS, effectiveMaxRuntimeMS, warnings)
 		}
 		snap := task.snapshot()
 		return marshalToolResult(call, shellRunBackgroundedResult(snap, requestedYieldMS, effectiveYieldMS, requestedMaxRuntimeMS, effectiveMaxRuntimeMS, warnings, shellYieldTimeoutDiagnosis(shellPol, snap)))
@@ -283,9 +283,11 @@ func shellRunResult(in shellRunResultInput) map[string]any {
 	return result
 }
 
-func shellRunForegroundFinalResult(call core.ToolCall, snap shellTaskSnapshot, requestedTimeoutMS int, effectiveTimeoutMS int, warnings []string) (core.ToolResult, error) {
+func shellRunForegroundFinalResult(ctx context.Context, call core.ToolCall, snap shellTaskSnapshot, requestedTimeoutMS int, effectiveTimeoutMS int, warnings []string) (core.ToolResult, error) {
 	stdout, stdoutTr := truncateTextSmart(snap.Stdout, maxToolTextChars)
 	stderr, stderrTr := truncateTextSmart(snap.Stderr, maxToolTextChars)
+	archivePath := archiveTruncatedShellOutput(ctx, call, snap, stdoutTr, stderrTr)
+	stdout, stderr = annotateTruncatedShellOutput(stdout, stderr, stdoutTr, stderrTr, archivePath)
 	durationMS := shellTaskDurationMS(snap)
 	status := "ok"
 	summaryParts := []string{"command completed"}
@@ -348,13 +350,76 @@ func shellRunForegroundFinalResult(call core.ToolCall, snap shellTaskSnapshot, r
 		CanWrite:           snap.CanWrite,
 	})
 	if success {
-		return marshalToolResult(call, result)
+		return marshalToolResultWithMetadata(call, result, shellArchiveMetadata(archivePath))
 	}
 	content, marshalErr := core.MarshalToolEnvelope(core.ToolEnvelope{Success: false, Data: result, Message: message, Code: code})
 	if marshalErr != nil {
 		return marshalToolError(call, code, message), nil
 	}
-	return core.ToolResult{ToolCallID: call.ID, Name: call.Name, ModelText: content, Outcome: core.OutcomeForErrorCode(code), Code: code}, nil
+	return core.ToolResult{ToolCallID: call.ID, Name: call.Name, ModelText: content, Outcome: core.OutcomeForErrorCode(code), Code: code, Metadata: shellArchiveMetadata(archivePath)}, nil
+}
+
+func archiveTruncatedShellOutput(ctx context.Context, call core.ToolCall, snap shellTaskSnapshot, stdoutTr, stderrTr truncationMeta) string {
+	if !stdoutTr.Truncated && !stderrTr.Truncated {
+		return ""
+	}
+	payload := shellArchivePayload(snap, stdoutTr.Truncated, stderrTr.Truncated)
+	if strings.TrimSpace(payload) == "" {
+		return ""
+	}
+	return core.ArchiveToolResult(ctx, call.Name, call.ID, []byte(payload))
+}
+
+func shellArchivePayload(snap shellTaskSnapshot, stdoutTruncated, stderrTruncated bool) string {
+	stdout := snap.Stdout
+	stderr := snap.Stderr
+	switch {
+	case stdoutTruncated && !stderrTruncated && strings.TrimSpace(stderr) == "":
+		return stdout
+	case stderrTruncated && !stdoutTruncated && strings.TrimSpace(stdout) == "":
+		return stderr
+	default:
+		var b strings.Builder
+		b.WriteString("command: ")
+		b.WriteString(snap.Command)
+		if strings.TrimSpace(snap.CWD) != "" {
+			b.WriteString("\ncwd: ")
+			b.WriteString(snap.CWD)
+		}
+		b.WriteString("\n\nstdout:\n")
+		b.WriteString(stdout)
+		b.WriteString("\n\nstderr:\n")
+		b.WriteString(stderr)
+		return b.String()
+	}
+}
+
+func annotateTruncatedShellOutput(stdout, stderr string, stdoutTr, stderrTr truncationMeta, archivePath string) (string, string) {
+	if archivePath == "" {
+		return stdout, stderr
+	}
+	hint := shellArchiveHint(archivePath)
+	if stdoutTr.Truncated {
+		return stdout + hint, stderr
+	}
+	if stderrTr.Truncated {
+		return stdout, stderr + hint
+	}
+	return stdout, stderr
+}
+
+func shellArchiveHint(path string) string {
+	return fmt.Sprintf("\nFull output saved to: %s\nUse read_file with offset/limit or grep/search_files first; do not read the full file unless needed.", path)
+}
+
+func shellArchiveMetadata(path string) map[string]any {
+	if path == "" {
+		return nil
+	}
+	return map[string]any{
+		"output_truncated": true,
+		"full_result_path": path,
+	}
 }
 
 func shellRunForegroundTimeoutResult(call core.ToolCall, snap shellTaskSnapshot, requestedTimeoutMS int, effectiveTimeoutMS int, warnings []string) (core.ToolResult, error) {
@@ -614,7 +679,7 @@ func (b *Toolset) shellWaitForTask(ctx context.Context, call core.ToolCall, task
 	for {
 		snap := task.snapshot()
 		if snap.Status != "running" {
-			return b.shellWaitFinalResult(call, snap, extraMetrics)
+			return b.shellWaitFinalResult(ctx, call, snap, extraMetrics)
 		}
 		select {
 		case <-ctx.Done():
@@ -622,7 +687,7 @@ func (b *Toolset) shellWaitForTask(ctx context.Context, call core.ToolCall, task
 		case <-timer.C:
 			snap = task.snapshot()
 			if snap.Status != "running" {
-				return b.shellWaitFinalResult(call, snap, extraMetrics)
+				return b.shellWaitFinalResult(ctx, call, snap, extraMetrics)
 			}
 			result := map[string]any{
 				"status": "running",
@@ -658,9 +723,11 @@ func (b *Toolset) shellWaitForTask(ctx context.Context, call core.ToolCall, task
 	}
 }
 
-func (b *Toolset) shellWaitFinalResult(call core.ToolCall, snap shellTaskSnapshot, extraMetrics map[string]any) (core.ToolResult, error) {
+func (b *Toolset) shellWaitFinalResult(ctx context.Context, call core.ToolCall, snap shellTaskSnapshot, extraMetrics map[string]any) (core.ToolResult, error) {
 	stdout, stdoutTr := truncateTextSmart(snap.Stdout, maxToolTextChars)
 	stderr, stderrTr := truncateTextSmart(snap.Stderr, maxToolTextChars)
+	archivePath := archiveTruncatedShellOutput(ctx, call, snap, stdoutTr, stderrTr)
+	stdout, stderr = annotateTruncatedShellOutput(stdout, stderr, stdoutTr, stderrTr, archivePath)
 	b.tasks.release(snap.ID)
 	result := map[string]any{
 		"status": snap.Status,
@@ -692,7 +759,7 @@ func (b *Toolset) shellWaitFinalResult(call core.ToolCall, snap shellTaskSnapsho
 	if diagnosis := snap.Diagnosis.asMap(); diagnosis != nil {
 		result["diagnosis"] = diagnosis
 	}
-	return marshalToolResult(call, result)
+	return marshalToolResultWithMetadata(call, result, shellArchiveMetadata(archivePath))
 }
 
 func (b *Toolset) shellCancel(ctx context.Context, call core.ToolCall) (core.ToolResult, error) {

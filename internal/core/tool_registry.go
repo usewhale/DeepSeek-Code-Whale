@@ -55,6 +55,10 @@ func ToolResultArchiveSessionDir(dir, sessionID string) string {
 	return filepath.Join(dir, sanitizeArchivePathPart(sessionID, "session"))
 }
 
+func ArchiveToolResult(ctx context.Context, toolName, toolCallID string, payload []byte) string {
+	return archiveToolResult(ctx, toolName, toolCallID, payload)
+}
+
 func NewToolRegistry(tools []Tool) *ToolRegistry {
 	r, err := NewToolRegistryChecked(tools)
 	if err != nil {
