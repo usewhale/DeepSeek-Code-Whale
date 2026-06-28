@@ -375,3 +375,24 @@ func uniqueStrings(in []string) []string {
 	}
 	return out
 }
+
+// toolResultReadPath extracts the file path from a read-only filesystem tool call
+// and reports whether it falls inside the tool-results session directory, which
+// should be auto-allowed without user approval.
+func ToolResultReadPath(dir string, call core.ToolCall) bool {
+	target := strings.TrimSpace(readScopeTarget(call))
+	if target == "" || target == "*" {
+		return false
+	}
+	dir = strings.TrimSpace(dir)
+	if dir == "" {
+		return false
+	}
+	targetAbs, err := filepath.Abs(target)
+	if err != nil {
+		targetAbs = filepath.Clean(target)
+	} else {
+		targetAbs = filepath.Clean(targetAbs)
+	}
+	return pathInsideAny(targetAbs, []string{filepath.Clean(dir)})
+}

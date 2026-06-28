@@ -421,6 +421,27 @@ func (a *Agent) cleanupLoopContext() context.Context {
 	return a.lifecycleCtx
 }
 
+// isToolResultReadTool reports whether the tool name is one of the read-only
+// filesystem tools that may be auto-allowed for tool-results paths.
+func isToolResultReadTool(name string) bool {
+	switch name {
+	case "read_file", "grep", "search_files":
+		return true
+	default:
+		return false
+	}
+}
+
+// isToolResultReadPath reports whether the given tool call targets a path
+// inside the current session's persisted tool-results archive directory.
+func (a *Agent) isToolResultReadPath(sessionID string, call core.ToolCall) bool {
+	if a == nil || strings.TrimSpace(a.toolResultArchiveDir) == "" {
+		return false
+	}
+	dir := core.ToolResultArchiveSessionDir(a.toolResultArchiveDir, sessionID)
+	return policy.ToolResultReadPath(dir, call)
+}
+
 type AgentOption func(*Agent)
 
 func WithToolPolicy(policy policy.ToolPolicy) AgentOption {

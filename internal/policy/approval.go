@@ -218,7 +218,7 @@ func ApprovalKeysForDecision(call core.ToolCall, decision PolicyDecision) []stri
 		keys = append(keys, externalDirectoryGrantKey(decision.Pattern))
 	}
 	if len(keys) > 0 {
-		if decisionRequiresNonExternalApproval(decision) {
+		if DecisionRequiresNonExternalApproval(decision) {
 			keys = append(keys, ApprovalKeys(call)...)
 		}
 		return compactApprovalKeys(keys)
@@ -226,7 +226,7 @@ func ApprovalKeysForDecision(call core.ToolCall, decision PolicyDecision) []stri
 	return ApprovalKeys(call)
 }
 
-func decisionRequiresNonExternalApproval(decision PolicyDecision) bool {
+func DecisionRequiresNonExternalApproval(decision PolicyDecision) bool {
 	for _, req := range decision.ApprovalRequirements {
 		if strings.TrimSpace(req.Permission) != "" && req.Permission != "external_directory" {
 			return true
@@ -286,7 +286,7 @@ func readOnlyFilesystemTool(name string) bool {
 // permission rules. A command that independently requires approval (e.g.
 // rm */curl * ask rules) still contributes a non-external requirement, so
 // ApprovalKeysForDecision appends its command-scoped key and the directory
-// grant alone cannot approve it (see decisionRequiresNonExternalApproval).
+// grant alone cannot approve it (see DecisionRequiresNonExternalApproval).
 func externalDirectoryGrantEligible(call core.ToolCall) bool {
 	return readOnlyFilesystemTool(call.Name) || call.Name == "shell_run"
 }

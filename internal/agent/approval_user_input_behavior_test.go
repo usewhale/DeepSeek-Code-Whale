@@ -1075,3 +1075,106 @@ func TestApprovalAllowForSessionCachesMultiEditByFile(t *testing.T) {
 		t.Fatalf("expected approvals for first file and later new file only, got %d", asked)
 	}
 }
+
+// toolResultReadAutoApprovalProvider emits a sequence of read-only filesystem
+// tool calls that target the tool-results archive directory.  read_file, grep
+// and search_files should be auto-allowed; list_dir should still require
+// approval.
+type toolResultReadAutoApprovalProvider struct {
+	sessionFile string
+	siblingFile string
+	calls       int
+}
+
+func (p *toolResultReadAutoApprovalProvider) StreamResponse(_ context.Context, _ []Message, _ []Tool) <-chan ProviderEvent {
+	p.calls++
+	switch p.calls {
+	case 1:
+		return eventStream(toolUseEvent(toolCall("tc-read", "read_file", `{"file_path":`+strconv.Quote(p.sessionFile)+`}`)))
+	case 2:
+		return eventStream(toolUseEvent(toolCall("tc-grep", "grep", `{"path":`+strconv.Quote(filepath.Dir(p.sessionFile))+`,"pattern":"needle"}`)))
+	case 3:
+		return eventStream(toolUseEvent(toolCall("tc-search", "search_files", `{"path":`+strconv.Quote(filepath.Dir(p.sessionFile))+`,"pattern":"needle"}`)))
+	case 4:
+		return eventStream(toolUseEvent(toolCall("tc-list", "list_dir", `{"path":`+strconv.Quote(filepath.Dir(p.sessionFile))+`}`)))
+	case 5:
+		return eventStream(toolUseEvent(toolCall("tc-sibling-read", "read_file", `{"file_path":`+strconv.Quote(p.siblingFile)+`}`)))
+	default:
+		return eventStream(endTurnEvent("done"))
+	}
+}
+
+func TestToolResultReadAutoApproval(t *testing.T) {
+	home, err := os.MkdirTemp(".", "whale-agent-tr-auto-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	home, err = filepath.Abs(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(home) })
+
+	workspace := filepath.Join(home, "workspace")
+	dataDir := filepath.Join(home, ".whale")
+	sessionID := "sess-1"
+	siblingID := "sess-2"
+
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	toolResultsDir := filepath.Join(dataDir, "tool-results")
+	sessionDir := core.ToolResultArchiveSessionDir(toolResultsDir, sessionID)
+	siblingDir := core.ToolResultArchiveSessionDir(toolResultsDir, siblingID)
+	if err := os.MkdirAll(sessionDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(siblingDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sessionFile := filepath.Join(sessionDir, "output.txt")
+	siblingFile := filepath.Join(siblingDir, "output.txt")
+	if err := os.WriteFile(sessionFile, []byte("current session output\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(siblingFile, []byte("other session output\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	toolset, err := whaletools.NewToolset(workspace)
+	if err != nil {
+		t.Fatalf("new toolset: %v", err)
+	}
+	store := NewInMemoryStore()
+	prov := &toolResultReadAutoApprovalProvider{sessionFile: sessionFile, siblingFile: siblingFile}
+	asked := 0
+	a := NewAgentWithRegistry(
+		prov,
+		store,
+		NewToolRegistry(toolset.Tools()),
+		WithProjectMemory(false, 0, nil, workspace),
+		WithUsageLogPath(filepath.Join(dataDir, "usage")),
+		WithToolPolicy(RulePolicy{Default: PermissionAllow, Rules: DefaultRules(), WorkspaceRoot: workspace}),
+		WithApprovalFunc(func(req ApprovalRequest) ApprovalDecision {
+			asked++
+			if req.ToolCall.ID == "tc-list" {
+				return ApprovalAllowForSession
+			}
+			if req.ToolCall.ID == "tc-sibling-read" {
+				return ApprovalAllowForSession
+			}
+			t.Fatalf("unexpected approval request for tool %s (%s)", req.ToolCall.ID, req.ToolCall.Name)
+			return ApprovalDeny
+		}),
+	)
+
+	if _, err := a.RunSession(context.Background(), sessionID, "read tool results"); err != nil {
+		t.Fatalf("run failed: %v", err)
+	}
+	// Only list_dir (tc-list) and sibling-session read (tc-sibling-read)
+	// should prompt for approval.  read_file, grep and search_files on the
+	// current session's archive must be auto-allowed.
+	if asked != 2 {
+		t.Fatalf("expected 2 approval prompts (list_dir + sibling read), got %d", asked)
+	}
+}
