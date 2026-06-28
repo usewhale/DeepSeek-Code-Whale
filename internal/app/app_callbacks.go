@@ -37,7 +37,7 @@ func (a *App) SetApprovalFunc(fn policy.ApprovalFunc) {
 			return a.approvalFn(req)
 		})
 	}
-	a.a = nil
+	a.resetAgent()
 }
 
 func (a *App) SetUserInputFunc(fn agent.UserInputFunc) {
@@ -45,5 +45,5 @@ func (a *App) SetUserInputFunc(fn agent.UserInputFunc) {
 		return
 	}
 	a.userInput = fn
-	a.a = nil
+	a.resetAgent()
 }

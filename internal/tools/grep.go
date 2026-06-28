@@ -32,7 +32,7 @@ func (b *Toolset) searchContent(ctx context.Context, call core.ToolCall) (core.T
 	if strings.TrimSpace(in.Pattern) == "" {
 		return marshalToolError(call, "invalid_args", "pattern is required"), nil
 	}
-	abs, err := b.safeReadPath(ctx, in.Path)
+	abs, err := b.safeToolResultReadPath(ctx, in.Path)
 	if err != nil {
 		return b.marshalReadPathError(call, in.Path, err), nil
 	}

@@ -28,7 +28,7 @@ func (a *App) SetMode(mode session.Mode) (string, error) {
 		return "", err
 	}
 	a.currentMode = mode
-	a.a = nil
+	a.resetAgent()
 	if previous != "" && previous != mode {
 		a.RecordModeChanged(string(previous), string(mode))
 	}
@@ -51,7 +51,7 @@ func (a *App) SetAutoAcceptPermissions(enabled bool) {
 	a.autoAcceptPermissions = enabled
 	a.approvalMu.Unlock()
 	a.cfg.AutoAcceptPermissions = enabled
-	a.a = nil
+	a.resetAgent()
 }
 func (a *App) WorkspaceRoot() string   { return a.workspaceRoot }
 func (a *App) Model() string           { return a.model }
@@ -95,14 +95,14 @@ func (a *App) SetModelAndEffort(modelName, effort string) error {
 	}
 	a.model = m
 	a.reasoningEffort = e
-	a.a = nil
+	a.resetAgent()
 	a.savePreferences()
 	return nil
 }
 
 func (a *App) SetThinkingEnabled(enabled bool) {
 	a.thinkingEnabled = enabled
-	a.a = nil
+	a.resetAgent()
 	a.savePreferences()
 }
 
@@ -134,10 +134,22 @@ func ViewModeToggleMessage(mode string) string {
 }
 
 func (a *App) Close() error {
-	if a == nil || a.mcpManager == nil {
+	if a == nil {
+		return nil
+	}
+	a.resetAgent()
+	if a.mcpManager == nil {
 		return nil
 	}
 	return a.mcpManager.Close()
+}
+
+func (a *App) resetAgent() {
+	if a == nil || a.a == nil {
+		return
+	}
+	a.a.Close()
+	a.a = nil
 }
 
 func (a *App) savePreferences() {

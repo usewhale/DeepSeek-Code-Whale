@@ -179,7 +179,7 @@ func (a *App) reloadWorkflowConfigForTurn() error {
 	if err := a.refreshMCPTools(); err != nil {
 		return err
 	}
-	a.a = nil
+	a.resetAgent()
 	if workflowsEnabledChanged {
 		a.recordWorkflowsEnabledChanged(a.cfg.WorkflowsEnabled)
 	}

@@ -13,6 +13,7 @@ func (a *Agent) dispatchWithRecovery(ctx context.Context, sessionID, assistantMe
 	attempt := 0
 	dispatchCtx := core.WithToolResultArchive(ctx, a.toolResultArchiveDir, sessionID)
 	dispatchCtx = toolctx.WithApprovedExternalReadRoots(dispatchCtx, externalReadRoots)
+	dispatchCtx = toolctx.WithToolResultReadRoots(dispatchCtx, []string{core.ToolResultArchiveSessionDir(a.toolResultArchiveDir, sessionID)})
 	emit := func(ev AgentEvent) bool {
 		return sendAgentEvent(ctx, events, ev)
 	}

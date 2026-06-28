@@ -26,7 +26,7 @@ func (b *Toolset) readFile(ctx context.Context, call core.ToolCall) (core.ToolRe
 	if err := decodeInput(call.Input, &in); err != nil {
 		return marshalToolError(call, "invalid_args", err.Error()), nil
 	}
-	abs, err := b.safeReadPath(ctx, in.FilePath)
+	abs, err := b.safeToolResultReadPath(ctx, in.FilePath)
 	if err != nil {
 		return b.marshalReadPathError(call, in.FilePath, err), nil
 	}

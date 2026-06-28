@@ -118,7 +118,7 @@ func (a *App) ExecuteSlash(line string) (CommandExecution, error) {
 			return out, err
 		}
 		a.currentMode = modeState.Mode
-		a.a = nil
+		a.resetAgent()
 		out.Text = fmt.Sprintf("New session\n\nsession:  %s", cmdResult.SessionID)
 		if oldMsgCount > 0 {
 			out.Text += fmt.Sprintf("\ndropped:  %d message(s) from %s", oldMsgCount, oldID)
@@ -264,7 +264,7 @@ func (a *App) ExecuteLocalCommand(line string) (CommandExecution, error) {
 		res, handled, err := a.pluginManager.HandleCommand(a.ctx, trimmed)
 		if handled || err != nil {
 			if res.Mutated {
-				a.a = nil
+				a.resetAgent()
 			}
 			out := CommandExecution{Handled: handled, Text: res.Text, Turn: res.Turn, Mutated: res.Mutated}
 			if handled && err == nil && pluginCommandID(trimmed) == "memory" && strings.TrimSpace(res.Text) != "" {
@@ -302,7 +302,7 @@ func (a *App) ExecuteLocalCommand(line string) (CommandExecution, error) {
 		if err != nil {
 			return CommandExecution{Handled: true}, err
 		}
-		a.a = nil
+		a.resetAgent()
 		if !info.Compacted {
 			text := "nothing to compact"
 			return CommandExecution{Handled: true, Text: text, LocalResult: buildCompactLocalResult(info, text)}, nil

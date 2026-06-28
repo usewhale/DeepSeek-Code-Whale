@@ -96,7 +96,7 @@ func (a *App) SetPluginEnabled(id string, enabled bool) (string, error) {
 	if err := a.refreshMCPTools(); err != nil {
 		return "", err
 	}
-	a.a = nil
+	a.resetAgent()
 	return msg, nil
 }
 

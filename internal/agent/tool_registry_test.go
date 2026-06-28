@@ -140,6 +140,9 @@ func TestToolRegistryArchivesLargeResultBeforeTruncation(t *testing.T) {
 	if !strings.HasPrefix(path, filepath.Join(archiveDir, "sess_1")) {
 		t.Fatalf("archive path not scoped to sanitized session dir: %q", path)
 	}
+	if filepath.Ext(path) != ".txt" {
+		t.Fatalf("archive path extension = %q, want .txt", path)
+	}
 	full, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read archive: %v", err)
@@ -149,5 +152,15 @@ func TestToolRegistryArchivesLargeResultBeforeTruncation(t *testing.T) {
 	}
 	if res.Metadata["full_result_path"] != path || res.Metadata["output_truncated"] != true {
 		t.Fatalf("tool result metadata missing archive path: %+v", res.Metadata)
+	}
+	for _, want := range []string{
+		"Full output saved to: " + path,
+		"read_file",
+		"offset/limit",
+		"grep/search_files",
+	} {
+		if !strings.Contains(res.ModelText, want) {
+			t.Fatalf("truncated model text missing %q:\n%s", want, res.ModelText)
+		}
 	}
 }

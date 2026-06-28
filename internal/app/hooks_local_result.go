@@ -113,7 +113,7 @@ func (a *App) rebuildHookRunner(message string) (string, error) {
 	a.toolMu.Lock()
 	a.hookRunner = hookRunner
 	a.toolMu.Unlock()
-	a.a = nil
+	a.resetAgent()
 	return message, nil
 }
 

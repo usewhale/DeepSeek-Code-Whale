@@ -61,7 +61,7 @@ func (b *Toolset) searchFiles(ctx context.Context, call core.ToolCall) (core.Too
 		return marshalToolError(call, "invalid_args", "pattern is required"), nil
 	}
 	limit := normalizeSearchFilesLimit(in.Limit)
-	abs, err := b.safeReadPath(ctx, in.Path)
+	abs, err := b.safeToolResultReadPath(ctx, in.Path)
 	if err != nil {
 		return b.marshalReadPathError(call, in.Path, err), nil
 	}

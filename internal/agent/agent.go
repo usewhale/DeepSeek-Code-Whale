@@ -280,6 +280,8 @@ type Agent struct {
 	budgetWarningUSD       float64
 	usageLogPath           string
 	toolResultArchiveDir   string
+	lifecycleCtx           context.Context
+	lifecycleCancel        context.CancelFunc
 	budgetWarned80         sync.Map
 	maxToolIters           int
 	maxToolCalls           int
@@ -341,6 +343,7 @@ func defaultMaxParallelSubagents() int {
 }
 
 func NewAgent(provider llm.Provider, store store.MessageStore, tools []core.Tool) *Agent {
+	lifecycleCtx, lifecycleCancel := context.WithCancel(context.Background())
 	return &Agent{
 		provider:               provider,
 		store:                  store,
@@ -360,6 +363,8 @@ func NewAgent(provider llm.Provider, store store.MessageStore, tools []core.Tool
 		sessionRuntime:         memory.NewSessionRuntime(""),
 		usageLogPath:           telemetry.DefaultUsageLogDir(),
 		toolResultArchiveDir:   defaultToolResultArchiveDir(telemetry.DefaultUsageLogDir()),
+		lifecycleCtx:           lifecycleCtx,
+		lifecycleCancel:        lifecycleCancel,
 		maxToolIters:           0, // 0 = unlimited: the interactive main agent is bounded by user cancellation, compaction, and the storm loop-guard (see maxConsecutiveStormRounds) — not by a round count. Subagents override via WithMaxToolIters.
 		maxParallelSubagents:   defaultMaxParallelSubagents(),
 	}
@@ -369,6 +374,7 @@ func NewAgentWithRegistry(provider llm.Provider, store store.MessageStore, tools
 	if tools == nil {
 		tools = core.NewToolRegistry(nil)
 	}
+	lifecycleCtx, lifecycleCancel := context.WithCancel(context.Background())
 	a := &Agent{
 		provider:               provider,
 		store:                  store,
@@ -388,6 +394,8 @@ func NewAgentWithRegistry(provider llm.Provider, store store.MessageStore, tools
 		sessionRuntime:         memory.NewSessionRuntime(""),
 		usageLogPath:           telemetry.DefaultUsageLogDir(),
 		toolResultArchiveDir:   defaultToolResultArchiveDir(telemetry.DefaultUsageLogDir()),
+		lifecycleCtx:           lifecycleCtx,
+		lifecycleCancel:        lifecycleCancel,
 		maxToolIters:           0, // 0 = unlimited: the interactive main agent is bounded by user cancellation, compaction, and the storm loop-guard (see maxConsecutiveStormRounds) — not by a round count. Subagents override via WithMaxToolIters.
 		maxParallelSubagents:   defaultMaxParallelSubagents(),
 	}
@@ -397,6 +405,20 @@ func NewAgentWithRegistry(provider llm.Provider, store store.MessageStore, tools
 		}
 	}
 	return a
+}
+
+func (a *Agent) Close() {
+	if a == nil || a.lifecycleCancel == nil {
+		return
+	}
+	a.lifecycleCancel()
+}
+
+func (a *Agent) cleanupLoopContext() context.Context {
+	if a == nil || a.lifecycleCtx == nil {
+		return context.Background()
+	}
+	return a.lifecycleCtx
 }
 
 type AgentOption func(*Agent)

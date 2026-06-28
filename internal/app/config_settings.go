@@ -103,7 +103,7 @@ func (a *App) ApplyConfigSettings(updates []ConfigSettingUpdate) (ConfigSettings
 	if err := a.refreshMCPTools(); err != nil {
 		return ConfigSettingsApplyResult{}, err
 	}
-	a.a = nil
+	a.resetAgent()
 	if workflowsEnabledChanged {
 		a.recordWorkflowsEnabledChanged(a.cfg.WorkflowsEnabled)
 	}

@@ -46,6 +46,15 @@ func WithToolResultArchive(ctx context.Context, dir, sessionID string) context.C
 	})
 }
 
+func ToolResultArchiveSessionDir(dir, sessionID string) string {
+	dir = strings.TrimSpace(dir)
+	sessionID = strings.TrimSpace(sessionID)
+	if dir == "" || sessionID == "" {
+		return ""
+	}
+	return filepath.Join(dir, sanitizeArchivePathPart(sessionID, "session"))
+}
+
 func NewToolRegistry(tools []Tool) *ToolRegistry {
 	r, err := NewToolRegistryChecked(tools)
 	if err != nil {
@@ -559,12 +568,14 @@ func archiveToolResult(ctx context.Context, toolName, toolCallID string, payload
 	if !ok || strings.TrimSpace(cfg.Dir) == "" || strings.TrimSpace(cfg.SessionID) == "" || len(payload) == 0 {
 		return ""
 	}
-	sessionID := sanitizeArchivePathPart(cfg.SessionID, "session")
 	callID := sanitizeArchivePathPart(toolCallID, "tool-call")
 	tool := sanitizeArchivePathPart(toolName, "tool")
 	sum := sha256.Sum256(payload)
-	name := fmt.Sprintf("%s-%s-%s.json", tool, callID, hex.EncodeToString(sum[:8]))
-	dir := filepath.Join(cfg.Dir, sessionID)
+	name := fmt.Sprintf("%s-%s-%s.txt", tool, callID, hex.EncodeToString(sum[:8]))
+	dir := ToolResultArchiveSessionDir(cfg.Dir, cfg.SessionID)
+	if dir == "" {
+		return ""
+	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return ""
 	}

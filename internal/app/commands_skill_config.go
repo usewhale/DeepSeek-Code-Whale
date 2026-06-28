@@ -22,7 +22,7 @@ func (a *App) reloadSkillDisabledConfig() error {
 	if a.toolset != nil {
 		a.toolset.SetSkillDisabled(a.cfg.SkillsDisabled)
 	}
-	a.a = nil
+	a.resetAgent()
 	return nil
 }
 

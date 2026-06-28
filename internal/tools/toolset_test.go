@@ -1946,6 +1946,71 @@ func TestApprovedExternalReadRootsAllowReadOnlyTools(t *testing.T) {
 	}
 }
 
+func TestToolResultReadRootsAllowOnlyReadAndSearchTools(t *testing.T) {
+	parent := t.TempDir()
+	workspace := filepath.Join(parent, "workspace")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatalf("mkdir workspace: %v", err)
+	}
+	root := filepath.Join(parent, ".whale", "tool-results")
+	current := filepath.Join(root, "session-1")
+	sibling := filepath.Join(root, "session-2")
+	if err := os.MkdirAll(current, 0o700); err != nil {
+		t.Fatalf("mkdir current tool results: %v", err)
+	}
+	if err := os.MkdirAll(sibling, 0o700); err != nil {
+		t.Fatalf("mkdir sibling tool results: %v", err)
+	}
+	currentFile := filepath.Join(current, "long-tool.txt")
+	siblingFile := filepath.Join(sibling, "long-tool.txt")
+	if err := os.WriteFile(currentFile, []byte("needle current\n"), 0o600); err != nil {
+		t.Fatalf("write current tool result: %v", err)
+	}
+	if err := os.WriteFile(siblingFile, []byte("needle sibling\n"), 0o600); err != nil {
+		t.Fatalf("write sibling tool result: %v", err)
+	}
+	ts, err := NewToolset(workspace)
+	if err != nil {
+		t.Fatalf("new toolset: %v", err)
+	}
+	ctx := WithToolResultReadRoots(context.Background(), []string{current})
+
+	readRes, err := ts.readFile(ctx, tc("read_file", map[string]any{"file_path": currentFile}))
+	if err != nil || readRes.IsError() || !strings.Contains(readRes.ModelText, "needle current") {
+		t.Fatalf("tool result read_file failed: err=%v res=%+v", err, readRes)
+	}
+	grepRes, err := ts.searchContent(ctx, tc("grep", map[string]any{"path": current, "pattern": "needle"}))
+	if err != nil || grepRes.IsError() || !strings.Contains(grepRes.ModelText, "long-tool.txt") {
+		t.Fatalf("tool result grep failed: err=%v res=%+v", err, grepRes)
+	}
+	searchRes, err := ts.searchFiles(ctx, tc("search_files", map[string]any{"path": current, "pattern": "long-tool"}))
+	if err != nil || searchRes.IsError() || !strings.Contains(searchRes.ModelText, "long-tool.txt") {
+		t.Fatalf("tool result search_files failed: err=%v res=%+v", err, searchRes)
+	}
+
+	listRes, err := ts.listDir(ctx, tc("list_dir", map[string]any{"path": current}))
+	if err != nil {
+		t.Fatalf("list_dir err: %v", err)
+	}
+	if !listRes.IsError() || !strings.Contains(listRes.ModelText, "path escapes workspace") {
+		t.Fatalf("list_dir should not inherit tool-result read roots: %+v", listRes)
+	}
+	siblingRes, err := ts.readFile(ctx, tc("read_file", map[string]any{"file_path": siblingFile}))
+	if err != nil {
+		t.Fatalf("sibling read err: %v", err)
+	}
+	if !siblingRes.IsError() || !strings.Contains(siblingRes.ModelText, "path escapes workspace") {
+		t.Fatalf("sibling session should remain blocked: %+v", siblingRes)
+	}
+	parentRes, err := ts.searchContent(ctx, tc("grep", map[string]any{"path": filepath.Dir(root), "pattern": "needle"}))
+	if err != nil {
+		t.Fatalf("parent grep err: %v", err)
+	}
+	if !parentRes.IsError() || !strings.Contains(parentRes.ModelText, "path escapes workspace") {
+		t.Fatalf("parent .whale path should remain blocked: %+v", parentRes)
+	}
+}
+
 func TestApprovedExternalReadRootsPreserveMissingPathErrors(t *testing.T) {
 	parent := t.TempDir()
 	workspace := filepath.Join(parent, "workspace")

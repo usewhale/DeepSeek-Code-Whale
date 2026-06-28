@@ -39,7 +39,7 @@ func (a *App) executeGoalCommand(line string) (CommandExecution, bool, error) {
 		if err := session.ClearGoalState(a.sessionsDir, a.sessionID); err != nil {
 			return CommandExecution{Handled: true}, true, err
 		}
-		a.a = nil
+		a.resetAgent()
 		return CommandExecution{Handled: true, Text: "Goal cleared.\n\nObjective was: " + st.Objective, Mutated: true}, true, nil
 	case "pause":
 		return a.setGoalStatus(session.GoalStatusPaused, false)
@@ -77,7 +77,7 @@ func (a *App) executeGoalCommand(line string) (CommandExecution, bool, error) {
 	if err := session.SaveGoalState(a.sessionsDir, a.sessionID, st); err != nil {
 		return CommandExecution{Handled: true}, true, err
 	}
-	a.a = nil
+	a.resetAgent()
 	text := "Goal set:\n  " + st.Objective
 	if st.TokenBudget > 0 {
 		text += fmt.Sprintf("\nBudget: %s tokens", formatGoalTokens(st.TokenBudget))
@@ -184,7 +184,7 @@ func (a *App) setGoalStatus(status session.GoalStatus, startTurn bool) (CommandE
 		if err := session.SaveGoalState(a.sessionsDir, a.sessionID, st); err != nil {
 			return CommandExecution{Handled: true}, true, err
 		}
-		a.a = nil
+		a.resetAgent()
 		return CommandExecution{Handled: true, Text: "Goal budget limit reached.\n\nUse /goal clear to set a new goal.", Mutated: true}, true, nil
 	}
 	switch status {
@@ -199,7 +199,7 @@ func (a *App) setGoalStatus(status session.GoalStatus, startTurn bool) (CommandE
 		if err := session.SaveGoalState(a.sessionsDir, a.sessionID, st); err != nil {
 			return CommandExecution{Handled: true}, true, err
 		}
-		a.a = nil
+		a.resetAgent()
 		return CommandExecution{Handled: true, Text: "Goal paused.\n\nUse /goal resume to continue.", Mutated: true}, true, nil
 	case session.GoalStatusActive:
 		switch st.Status {
@@ -217,7 +217,7 @@ func (a *App) setGoalStatus(status session.GoalStatus, startTurn bool) (CommandE
 		if err := session.SaveGoalState(a.sessionsDir, a.sessionID, st); err != nil {
 			return CommandExecution{Handled: true}, true, err
 		}
-		a.a = nil
+		a.resetAgent()
 		out := CommandExecution{Handled: true, Text: "Goal resumed:\n  " + st.Objective, Mutated: true}
 		if modeText != "" {
 			out.Text += "\n" + modeText
@@ -238,7 +238,7 @@ func (a *App) setGoalStatus(status session.GoalStatus, startTurn bool) (CommandE
 		if err := session.SaveGoalState(a.sessionsDir, a.sessionID, st); err != nil {
 			return CommandExecution{Handled: true}, true, err
 		}
-		a.a = nil
+		a.resetAgent()
 		return CommandExecution{Handled: true, Mutated: true}, true, nil
 	default:
 		return CommandExecution{Handled: true, Mutated: true}, true, nil

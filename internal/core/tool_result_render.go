@@ -296,7 +296,7 @@ func RenderTruncatedToolText(text string, maxChars int, archivePath string) stri
 	}
 	marker := fmt.Sprintf("\n...[output truncated: %d of %d chars omitted]...\n", 0, len(text))
 	if archivePath != "" {
-		marker = fmt.Sprintf("\n...[output truncated: %d of %d chars omitted; full result: %s]...\n", 0, len(text), archivePath)
+		marker = truncatedToolResultMarker(0, len(text), archivePath)
 	}
 	for budget := maxChars; budget >= 1024; budget = budget * 3 / 4 {
 		bodyBudget := budget - len(marker) - 24 // slack for the omitted count digits
@@ -313,7 +313,7 @@ func RenderTruncatedToolText(text string, maxChars int, archivePath string) stri
 		omitted := len(text) - len(head) - len(tail)
 		m := fmt.Sprintf("\n...[output truncated: %d of %d chars omitted]...\n", omitted, len(text))
 		if archivePath != "" {
-			m = fmt.Sprintf("\n...[output truncated: %d of %d chars omitted; full result: %s]...\n", omitted, len(text), archivePath)
+			m = truncatedToolResultMarker(omitted, len(text), archivePath)
 		}
 		out := head + m + tail
 		if len(out) <= maxChars {
@@ -324,7 +324,7 @@ func RenderTruncatedToolText(text string, maxChars int, archivePath string) stri
 	// in-band: a head slice plus a compact marker, never a bare prefix.
 	smallMarker := fmt.Sprintf("\n...[truncated, %d chars total]...", len(text))
 	if archivePath != "" {
-		smallMarker = fmt.Sprintf("\n...[truncated, %d chars total; full result: %s]...", len(text), archivePath)
+		smallMarker = compactTruncatedToolResultMarker(len(text), archivePath)
 	}
 	headBudget := maxChars - len(smallMarker)
 	if headBudget <= 0 {
@@ -332,6 +332,20 @@ func RenderTruncatedToolText(text string, maxChars int, archivePath string) stri
 		return truncateOnRuneBoundary(smallMarker[1:min(maxChars+1, len(smallMarker))], false)
 	}
 	return truncateOnRuneBoundary(text[:min(headBudget, len(text))], false) + smallMarker
+}
+
+func truncatedToolResultMarker(omitted, total int, archivePath string) string {
+	if archivePath == "" {
+		return fmt.Sprintf("\n...[output truncated: %d of %d chars omitted]...\n", omitted, total)
+	}
+	return fmt.Sprintf("\n...[output truncated: %d of %d chars omitted]...\nFull output saved to: %s\nUse read_file with offset/limit or grep/search_files first; do not read the full file unless needed.\n", omitted, total, archivePath)
+}
+
+func compactTruncatedToolResultMarker(total int, archivePath string) string {
+	if archivePath == "" {
+		return fmt.Sprintf("\n...[truncated, %d chars total]...", total)
+	}
+	return fmt.Sprintf("\n...[truncated, %d chars total]...\nFull output saved to: %s\nUse read_file with offset/limit or grep/search_files first; do not read the full file unless needed.", total, archivePath)
 }
 
 // BoundedTruncationPayload replaces the full canonical payload when the

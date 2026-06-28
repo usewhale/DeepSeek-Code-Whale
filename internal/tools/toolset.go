@@ -40,6 +40,7 @@ type Toolset struct {
 }
 
 type externalReadRootsKey struct{}
+type toolResultReadRootsKey struct{}
 
 func WithApprovedExternalReadRoots(ctx context.Context, roots []string) context.Context {
 	cleaned := make([]string, 0, len(roots))
@@ -53,6 +54,20 @@ func WithApprovedExternalReadRoots(ctx context.Context, roots []string) context.
 		return ctx
 	}
 	return context.WithValue(ctx, externalReadRootsKey{}, cleaned)
+}
+
+func WithToolResultReadRoots(ctx context.Context, roots []string) context.Context {
+	cleaned := make([]string, 0, len(roots))
+	for _, root := range roots {
+		root = cleanOptionalAbsPath(root)
+		if root != "" {
+			cleaned = append(cleaned, root)
+		}
+	}
+	if len(cleaned) == 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, toolResultReadRootsKey{}, cleaned)
 }
 
 func NewToolset(root string) (*Toolset, error) {
@@ -276,6 +291,14 @@ func (b *Toolset) safeWorkspacePath(raw string) (string, error) {
 }
 
 func (b *Toolset) safeReadPath(ctx context.Context, raw string) (string, error) {
+	return b.safeReadPathWithToolResults(ctx, raw, false)
+}
+
+func (b *Toolset) safeToolResultReadPath(ctx context.Context, raw string) (string, error) {
+	return b.safeReadPathWithToolResults(ctx, raw, true)
+}
+
+func (b *Toolset) safeReadPathWithToolResults(ctx context.Context, raw string, allowToolResults bool) (string, error) {
 	if expanded := expandHomePath(raw); expanded != strings.TrimSpace(raw) {
 		target := cleanTargetPath(expanded, b.root)
 		if target == "" {
@@ -286,7 +309,7 @@ func (b *Toolset) safeReadPath(ctx context.Context, raw string) (string, error) 
 		if abs, err := b.safeWorkspacePath(expanded); err == nil {
 			return abs, nil
 		}
-		if b.isProjectReadPath(target) || b.isApprovedExternalReadPath(ctx, target) || b.isDiscoveredSkillReadPath(target) {
+		if b.isProjectReadPath(target) || b.isApprovedExternalReadPath(ctx, target) || (allowToolResults && b.isToolResultReadPath(ctx, target)) || b.isDiscoveredSkillReadPath(target) {
 			return target, nil
 		}
 		return "", fmt.Errorf("path escapes workspace: %s", strings.TrimSpace(raw))
@@ -298,7 +321,7 @@ func (b *Toolset) safeReadPath(ctx context.Context, raw string) (string, error) 
 	if target == "" {
 		return "", fmt.Errorf("path escapes workspace: %s", raw)
 	}
-	if b.isProjectReadPath(target) || b.isApprovedExternalReadPath(ctx, target) {
+	if b.isProjectReadPath(target) || b.isApprovedExternalReadPath(ctx, target) || (allowToolResults && b.isToolResultReadPath(ctx, target)) {
 		return target, nil
 	}
 	if b.isDiscoveredSkillReadPath(target) {
@@ -377,6 +400,15 @@ func (b *Toolset) isProjectReadPath(target string) bool {
 
 func (b *Toolset) isApprovedExternalReadPath(ctx context.Context, target string) bool {
 	roots, _ := ctx.Value(externalReadRootsKey{}).([]string)
+	return pathWithinAnyRoot(target, roots)
+}
+
+func (b *Toolset) isToolResultReadPath(ctx context.Context, target string) bool {
+	roots, _ := ctx.Value(toolResultReadRootsKey{}).([]string)
+	return pathWithinAnyRoot(target, roots)
+}
+
+func pathWithinAnyRoot(target string, roots []string) bool {
 	if len(roots) == 0 {
 		return false
 	}

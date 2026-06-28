@@ -79,6 +79,7 @@ func (a *Agent) InjectTurnInput(ctx context.Context, sessionID string, newMessag
 }
 
 func (a *Agent) runStreamWithNewMessages(ctx context.Context, sessionID string, newMessages []core.Message, opts RunOptions) (<-chan AgentEvent, error) {
+	startToolResultCleanupLoop(a.cleanupLoopContext(), a.toolResultArchiveDir)
 	turnState := &activeTurnState{}
 	if _, loaded := a.active.LoadOrStore(sessionID, turnState); loaded {
 		return nil, ErrSessionBusy
