@@ -644,14 +644,20 @@ func editLine(toolName, fallback string, env toolResultEnvelope) string {
 	case "write_file", "write":
 		return "Edited " + core.FirstNonEmpty(core.AsString(payload["file_path"]), core.AsString(data["file_path"]), actionDetailFallback(fallback, "Edited"), "file")
 	case "edit_file", "edit":
-		path := core.FirstNonEmpty(core.AsString(payload["file_path"]), core.AsString(data["file_path"]), actionDetailFallback(fallback, "Edited"), actionDetailFallback(fallback, "Edit failed"), "file")
+		path := core.FirstNonEmpty(core.AsString(payload["file_path"]), core.AsString(data["file_path"]), actionDetailFallback(fallback, "Edited"), actionDetailFallback(fallback, "Edit failed"), actionDetailFallback(fallback, "Edit re-reading"), "file")
 		if !toolEnvelopeSucceeded(env) {
+			if isRecoverableEditMiss(env) {
+				return "Edit re-reading " + path
+			}
 			return "Edit failed " + path
 		}
 		return "Edited " + path
 	case "multi_edit":
-		path := core.FirstNonEmpty(core.AsString(payload["file_path"]), core.AsString(data["file_path"]), actionDetailFallback(fallback, "Edited"), actionDetailFallback(fallback, "Edit failed"), "file")
+		path := core.FirstNonEmpty(core.AsString(payload["file_path"]), core.AsString(data["file_path"]), actionDetailFallback(fallback, "Edited"), actionDetailFallback(fallback, "Edit failed"), actionDetailFallback(fallback, "Edit re-reading"), "file")
 		if !toolEnvelopeSucceeded(env) {
+			if isRecoverableEditMiss(env) {
+				return "Edit re-reading " + path
+			}
 			return "Edit failed " + path
 		}
 		return "Edited " + path

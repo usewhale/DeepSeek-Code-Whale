@@ -112,7 +112,7 @@ func RoleBorder(role string) lipgloss.Color {
 		return Default.ResultDenied
 	case "result_failed", "shell_result_failed", "error":
 		return Default.Error
-	case "result_blocked", "shell_result_blocked", "result_mode_hint", "shell_result_mode_hint", "result_http_error", "shell_result_http_error", "result_usage_hint", "shell_result_usage_hint":
+	case "result_blocked", "shell_result_blocked", "result_mode_hint", "shell_result_mode_hint", "result_http_error", "shell_result_http_error", "result_usage_hint", "shell_result_usage_hint", "result_recoverable":
 		return Default.Warn
 	case "result_timeout", "shell_result_timeout":
 		return Default.ResultTimeout

@@ -170,16 +170,17 @@ type focusToolSummary struct {
 }
 
 type focusSummaryBucket struct {
-	count   int
-	running int
-	failed  int
-	denied  int
-	blocked int
-	mode    int
-	http    int
-	nonzero int
-	details []string
-	entries []focusSummaryEntry
+	count       int
+	running     int
+	failed      int
+	denied      int
+	blocked     int
+	mode        int
+	http        int
+	nonzero     int
+	recoverable int
+	details     []string
+	entries     []focusSummaryEntry
 }
 
 type focusSummaryEntry struct {
@@ -250,7 +251,7 @@ func (s focusToolSummary) summary() *tuirender.FocusSummary {
 	recoveredShell, remainingShell := s.shell.splitRecovered()
 	recoveredShell = recoveredShell.withDisambiguatedShellCWD()
 	remainingShell = remainingShell.withDisambiguatedShellCWD()
-	for _, state := range []string{"denied", "blocked", "mode_hint", "http_error", "usage_hint", "failed", "running", "nonzero", "done"} {
+	for _, state := range []string{"denied", "blocked", "mode_hint", "http_error", "usage_hint", "failed", "recoverable", "running", "nonzero", "done"} {
 		add(focusStateHintSummaryPart("search", s.search, state, "Searching for", "Searched for", "Denied", "Failed", "pattern", "patterns", focusQuoteHint))
 		add(focusStateHintSummaryPart("read", s.read, state, "Reading", "Read", "Denied", "Failed", "file", "files", focusPlainHint))
 		add(focusStateHintSummaryPart("web", s.web, state, "Fetching", "Fetched", "Denied", "Failed", "URL", "URLs", focusPlainHint))
@@ -287,6 +288,8 @@ func (b *focusSummaryBucket) add(state, detail, identity string) {
 		b.http++
 	case "nonzero":
 		b.nonzero++
+	case "recoverable":
+		b.recoverable++
 	case "usage_hint":
 		b.blocked++
 	}
@@ -308,7 +311,7 @@ func (b focusSummaryBucket) allDenied() bool {
 }
 
 func (b focusSummaryBucket) succeeded() int {
-	return b.count - b.running - b.failed - b.denied - b.blocked - b.mode - b.http - b.nonzero
+	return b.count - b.running - b.failed - b.denied - b.blocked - b.mode - b.http - b.nonzero - b.recoverable
 }
 
 func (b focusSummaryBucket) splitRecovered() (focusSummaryBucket, focusSummaryBucket) {
@@ -406,7 +409,10 @@ func (b focusSummaryBucket) statusSuffix() string {
 	if b.nonzero > 0 {
 		status = append(status, fmt.Sprintf("%d exited non-zero", b.nonzero))
 	}
-	if succeeded := b.succeeded(); succeeded > 0 && (b.running > 0 || b.failed > 0 || b.denied > 0 || b.blocked > 0 || b.mode > 0 || b.http > 0 || b.nonzero > 0) {
+	if b.recoverable > 0 {
+		status = append(status, fmt.Sprintf("%d re-reading", b.recoverable))
+	}
+	if succeeded := b.succeeded(); succeeded > 0 && (b.running > 0 || b.failed > 0 || b.denied > 0 || b.blocked > 0 || b.mode > 0 || b.http > 0 || b.nonzero > 0 || b.recoverable > 0) {
 		status = append(status, fmt.Sprintf("%d succeeded", succeeded))
 	}
 	if b.denied > 0 {
@@ -436,6 +442,8 @@ func focusBucketState(b focusSummaryBucket) string {
 		return "running"
 	case b.nonzero > 0:
 		return "nonzero"
+	case b.recoverable > 0:
+		return "recoverable"
 	default:
 		return "done"
 	}
@@ -522,6 +530,9 @@ func focusStateCountSummaryPart(kind string, b focusSummaryBucket, state, runnin
 	if state == "failed" {
 		return focusCountSummaryPartWithVerb(kind, b, failedVerb, singular, plural)
 	}
+	if state == "recoverable" {
+		return focusSemanticStateSummaryPart(kind, b, state, focusCountAction(kind, b, "Re-reading", singular, plural))
+	}
 	if state == "blocked" || state == "mode_hint" || state == "http_error" || state == "usage_hint" {
 		return focusSemanticStateSummaryPart(kind, b, state, focusCountAction(kind, b, "Blocked", singular, plural))
 	}
@@ -549,6 +560,9 @@ func focusStateHintSummaryPart(kind string, b focusSummaryBucket, state, running
 	b = b.forState(state)
 	if state == "failed" {
 		return focusFailedHintSummaryPart(kind, b, failedVerb, singular, plural, formatHint)
+	}
+	if state == "recoverable" {
+		return focusSemanticStateSummaryPart(kind, b, state, focusCountAction(kind, b, "Re-reading", singular, plural))
 	}
 	if state == "blocked" || state == "mode_hint" || state == "http_error" || state == "usage_hint" {
 		return focusSemanticStateSummaryPart(kind, b, state, focusCountAction(kind, b, "Blocked", singular, plural))
@@ -745,6 +759,8 @@ func focusToolState(msg tuirender.UIMessage) string {
 		return "running"
 	case "result_failed", "result_error", "result_timeout", "shell_result_failed", "shell_result_error", "shell_result_timeout":
 		return "failed"
+	case "result_recoverable":
+		return "recoverable"
 	case "result_denied", "result_canceled", "shell_result_denied", "shell_result_canceled":
 		return "denied"
 	case "result_blocked", "shell_result_blocked":

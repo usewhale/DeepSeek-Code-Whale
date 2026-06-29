@@ -721,8 +721,26 @@ func summarizeExploreResult(toolName string, env toolResultEnvelope, successBySi
 	return "result_ok", "✓"
 }
 
+// isRecoverableEditMiss reports whether a failed edit result is a
+// search-not-found miss that the model is expected to self-correct by
+// re-reading the file. The edit/multi_edit tools emit this code only with a
+// read_file recovery hint, so it is never a terminal failure.
+func isRecoverableEditMiss(env toolResultEnvelope) bool {
+	return env.code == "search_not_found"
+}
+
 func summarizeEditResult(toolName string, env toolResultEnvelope, successBySignal bool) (string, string) {
 	if !successBySignal {
+		if isRecoverableEditMiss(env) {
+			// An edit/multi_edit search miss is recoverable: the tool emits a
+			// read_file recovery hint and the model self-corrects by re-reading
+			// and retrying. Render it as a soft, non-error outcome (amber,
+			// "Re-reading") rather than a red failure. Scoped to the edit path
+			// so a non-edit tool reusing this code never gets edit-specific
+			// "re-reading file" phrasing. Mirrors codex's distinct
+			// patch-apply-failure cell.
+			return "result_recoverable", "No match · re-reading file to retry"
+		}
 		return summarizeFailedResult(env, "edit failed")
 	}
 	switch toolName {

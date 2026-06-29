@@ -401,6 +401,8 @@ func toolEventBulletStyle(m UIMessage) lipgloss.Style {
 		return style.Foreground(tuitheme.Default.ResultDenied)
 	case "result_failed", "shell_result_failed", "result_error", "shell_result_error", "error":
 		return style.Foreground(tuitheme.Default.Error)
+	case "result_recoverable":
+		return style.Foreground(tuitheme.Default.Warn)
 	case "result_timeout", "shell_result_timeout":
 		return style.Foreground(tuitheme.Default.ResultTimeout)
 	case "result_canceled", "shell_result_canceled":
@@ -420,6 +422,8 @@ func toolEventVerbColor(m UIMessage) lipgloss.Color {
 		return tuitheme.Default.ResultDenied
 	case "result_failed", "shell_result_failed", "result_error", "shell_result_error", "error":
 		return tuitheme.Default.Error
+	case "result_recoverable":
+		return tuitheme.Default.Warn
 	case "result_timeout", "shell_result_timeout":
 		return tuitheme.Default.ResultTimeout
 	case "result_canceled", "shell_result_canceled":

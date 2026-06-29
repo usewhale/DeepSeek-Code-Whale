@@ -24,7 +24,7 @@ func spacedCardStyle(width int, borderColor lipgloss.Color) lipgloss.Style {
 func renderEntryText(role, text string, width int) string {
 	quiet := role == "you"
 	switch role {
-	case "assistant", "think", "plan", "status", "result", "result_ok", "result_neutral", "result_nonzero", "result_denied", "result_failed", "result_timeout", "result_canceled", "result_error", "result_running", "error", "info", "tool", "tool_summary":
+	case "assistant", "think", "plan", "status", "result", "result_ok", "result_neutral", "result_recoverable", "result_nonzero", "result_denied", "result_failed", "result_timeout", "result_canceled", "result_error", "result_running", "error", "info", "tool", "tool_summary":
 		return Markdown(text, width, quiet)
 	case "shell_result_ok", "shell_result_neutral", "shell_result_nonzero", "shell_result_denied", "shell_result_failed", "shell_result_timeout", "shell_result_canceled", "shell_result_error", "shell_result_running":
 		return text

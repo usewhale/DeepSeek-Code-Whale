@@ -235,6 +235,9 @@ func timelineCompletedToolTitle(toolName, summary, role string, item timeline.It
 	raw := lastToolResultText(item)
 	previous := firstToolCallTitle(toolName, item)
 	title := completedToolTitle(toolName, raw, previous)
+	if toolDisplayKind(toolName) == "edit" {
+		title = retitleEditForRole(title, role)
+	}
 	if toolDisplayKind(toolName) == "shell" && strings.TrimSpace(role) == "result_running" {
 		title = runningShellTitle(item, previous)
 	}
@@ -245,6 +248,28 @@ func timelineCompletedToolTitle(toolName, summary, role string, item timeline.It
 		title += "\n\n" + diff
 	}
 	return title
+}
+
+// retitleEditForRole overrides the edit verb using the authoritative result
+// role. completedToolTitle re-parses the result text, which in the live path is
+// the model-facing message string (not the structured envelope), so it cannot
+// see the result code and falls back to the "Edited" success verb. The role,
+// derived from the structured tool-result fields, is reliable, so it drives the
+// verb here. No-op when the title already carries a non-success verb (e.g. when
+// completedToolTitle was given a JSON envelope, as in unit tests).
+func retitleEditForRole(title, role string) string {
+	rest, ok := strings.CutPrefix(title, "Edited ")
+	if !ok {
+		return title
+	}
+	switch strings.TrimSpace(role) {
+	case "result_recoverable":
+		return "Edit re-reading " + rest
+	case "result_failed", "result_error":
+		return "Edit failed " + rest
+	default:
+		return title
+	}
 }
 
 func runningShellTitle(item timeline.Item, previous string) string {

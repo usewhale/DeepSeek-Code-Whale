@@ -175,7 +175,7 @@ func TestToolResultShowsDiffMetadata(t *testing.T) {
 	}
 }
 
-func TestToolResultFailedEditShowsFailedVerb(t *testing.T) {
+func TestToolResultEditSearchNotFoundShowsRecoverableVerb(t *testing.T) {
 	m := model{assembler: tuirender.NewAssembler(), mode: modeChat, width: 100, height: 24}
 	next, _ := m.Update(svcMsg(protocol.Event{
 		Kind:       protocol.EventToolCall,
@@ -192,14 +192,17 @@ func TestToolResultFailedEditShowsFailedVerb(t *testing.T) {
 	}))
 	m = next.(model)
 	plain := xansi.Strip(strings.Join(tuirender.ChatLines(m.transcript, 100), "\n"))
-	if !strings.Contains(plain, "Edit failed a.txt") {
-		t.Fatalf("expected failed edit title in transcript:\n%s", plain)
+	// A search_not_found miss is recoverable (the model re-reads and retries),
+	// so it renders as a soft "Edit re-reading" outcome rather than a hard
+	// "Edit failed" red error.
+	if !strings.Contains(plain, "Edit re-reading a.txt") {
+		t.Fatalf("expected recoverable edit title in transcript:\n%s", plain)
+	}
+	if strings.Contains(plain, "Edit failed a.txt") {
+		t.Fatalf("recoverable edit miss should not use the hard-failure verb:\n%s", plain)
 	}
 	if strings.Contains(plain, "Edited a.txt") {
 		t.Fatalf("failed edit should not use successful verb:\n%s", plain)
-	}
-	if !strings.Contains(plain, "search text not found") {
-		t.Fatalf("expected failure detail in transcript:\n%s", plain)
 	}
 }
 
@@ -360,6 +363,62 @@ func TestSummarizeToolResultForChat_ShellRunNonZeroExitWithStderr(t *testing.T) 
 	}
 	if strings.Contains(got, "Command failed") {
 		t.Fatalf("non-zero command result should not render as tool failure: %q", got)
+	}
+}
+
+func TestSummarizeToolResultForChat_EditSearchNotFoundIsRecoverable(t *testing.T) {
+	raw := `{"success":false,"code":"search_not_found","message":"search text not found","payload":{"file_path":"a.txt","recovery":{"recommended_next_tool":"read_file"}}}`
+	role, got := summarizeToolResultForChat("edit", raw)
+	if role != "result_recoverable" {
+		t.Fatalf("expected result_recoverable role, got %q", role)
+	}
+	if !strings.Contains(got, "re-reading") {
+		t.Fatalf("expected re-reading summary, got %q", got)
+	}
+	if !isRecoverableEditMiss(parseToolEnvelope(raw)) {
+		t.Fatalf("search_not_found should be classified as a recoverable edit miss")
+	}
+	if title := completedToolTitle("edit", raw, ""); strings.HasPrefix(title, "Edit failed") {
+		t.Fatalf("recoverable miss should not render as a hard failure title: %q", title)
+	}
+}
+
+func TestSummarizeToolResultForChat_NonEditSearchNotFoundIsNotRecoverable(t *testing.T) {
+	// The recoverable treatment is edit-specific. A non-edit tool (e.g. MCP or a
+	// custom tool) reusing code:"search_not_found" must not be shown as an
+	// edit-style "re-reading" retry — it is a genuine failure for that tool.
+	raw := `{"success":false,"code":"search_not_found","message":"no match in index"}`
+	role, got := summarizeToolResultForChat("some_mcp_tool", raw)
+	if role == "result_recoverable" {
+		t.Fatalf("non-edit search miss must not be result_recoverable, got role=%q text=%q", role, got)
+	}
+	if strings.Contains(got, "re-reading") {
+		t.Fatalf("non-edit search miss must not use edit-specific re-reading phrasing: %q", got)
+	}
+}
+
+func TestRetitleEditForRole(t *testing.T) {
+	// Live path: completedToolTitle re-parses the model-facing message string
+	// (not JSON), so it cannot see the code and returns the "Edited" verb. The
+	// authoritative role must correct it.
+	cases := []struct {
+		title string
+		role  string
+		want  string
+	}{
+		{"Edited calc.go", "result_recoverable", "Edit re-reading calc.go"},
+		{"Edited calc.go", "result_failed", "Edit failed calc.go"},
+		{"Edited calc.go", "result_error", "Edit failed calc.go"},
+		{"Edited calc.go", "result_ok", "Edited calc.go"},
+		// Idempotent: a title that already carries a non-success verb (JSON raw
+		// path, e.g. unit tests) is left untouched.
+		{"Edit re-reading calc.go", "result_recoverable", "Edit re-reading calc.go"},
+		{"Edit failed calc.go", "result_failed", "Edit failed calc.go"},
+	}
+	for _, c := range cases {
+		if got := retitleEditForRole(c.title, c.role); got != c.want {
+			t.Errorf("retitleEditForRole(%q, %q) = %q, want %q", c.title, c.role, got, c.want)
+		}
 	}
 }
 
