@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"github.com/usewhale/whale/internal/core"
 	whalemcp "github.com/usewhale/whale/internal/mcp"
@@ -101,6 +102,38 @@ func (a *App) setupDeferredToolSearchLocked(catalog *whalemcp.DeferredToolCatalo
 	}
 
 	a.toolset.SetDeferredToolSearch(catAdapter, promoter, renderer)
+}
+
+const availableDeferredToolsMaxChars = 4000
+
+// renderDeferredToolsBlock returns the <available-deferred-tools> block for
+// injection into the system prompt. Returns empty string when no MCP tools are
+// registered. The output is capped at availableDeferredToolsMaxChars to avoid
+// blowing up the system prompt when many MCP tools are registered.
+func (a *App) renderDeferredToolsBlock() string {
+	if a.mcpManager == nil {
+		return ""
+	}
+	catalog := a.mcpManager.BuildDeferredCatalog()
+	block := whalemcp.RenderAvailableDeferredTools(catalog)
+	if len(block) <= availableDeferredToolsMaxChars {
+		return block
+	}
+	// Truncate at a newline boundary near the limit.
+	truncated := block[:availableDeferredToolsMaxChars]
+	if idx := strings.LastIndex(truncated, "\n"); idx > 0 {
+		truncated = truncated[:idx]
+	}
+	// Count how many tools we omitted.
+	allTools := catalog.Names()
+	shownCount := 0
+	for _, name := range allTools {
+		if strings.Contains(truncated, name) {
+			shownCount++
+		}
+	}
+	omitted := len(allTools) - shownCount
+	return truncated + fmt.Sprintf("\n... %d more tool(s) omitted\n</available-deferred-tools>", omitted)
 }
 
 // makeDeferredPromoter returns a function that builds full Tool objects for given names,

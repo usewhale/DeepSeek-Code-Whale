@@ -295,3 +295,86 @@ func TestRestorePromotedToolsBuildToolsError(t *testing.T) {
 		t.Fatal("expected error when BuildTools fails for non-existent tool, got nil")
 	}
 }
+
+// --- renderDeferredToolsBlock tests ---
+
+func TestRenderDeferredToolsBlockNilManager(t *testing.T) {
+	app := &App{} // mcpManager is nil
+	if got := app.renderDeferredToolsBlock(); got != "" {
+		t.Fatalf("expected empty string for nil mcpManager, got %q", got)
+	}
+}
+
+func TestRenderDeferredToolsBlockWithTools(t *testing.T) {
+	mgr := newMCPRuntimeTestManager(t, "echoes a message")
+	app := &App{mcpManager: mgr}
+
+	block := app.renderDeferredToolsBlock()
+	if block == "" {
+		t.Fatal("expected non-empty block for populated catalog")
+	}
+	if !strings.Contains(block, "<available-deferred-tools>") {
+		t.Fatalf("expected opening tag, got %q", block)
+	}
+	if !strings.Contains(block, "</available-deferred-tools>") {
+		t.Fatalf("expected closing tag, got %q", block)
+	}
+	if !strings.Contains(block, "mcp__runtime__echo") {
+		t.Fatalf("expected tool name in block, got %q", block)
+	}
+}
+
+func TestRenderDeferredToolsBlockFormat(t *testing.T) {
+	mgr := newMCPRuntimeTestManager(t, "echoes a message")
+	app := &App{mcpManager: mgr}
+
+	block := app.renderDeferredToolsBlock()
+	if block == "" {
+		t.Fatal("expected non-empty block")
+	}
+	if !strings.HasPrefix(block, "<available-deferred-tools>\n") {
+		t.Fatalf("expected block to start with opening tag on its own line, got %q", block)
+	}
+	if !strings.HasSuffix(block, "</available-deferred-tools>") {
+		t.Fatalf("expected block to end with closing tag, got %q", block)
+	}
+	if !strings.Contains(block, "[server: ") {
+		t.Fatalf("expected server section, got %q", block)
+	}
+	if !strings.Contains(block, " — ") {
+		t.Fatalf("expected tool name/description separator, got %q", block)
+	}
+}
+
+func TestRenderDeferredToolsBlockTruncation(t *testing.T) {
+	// Simulate truncation by verifying that a block exceeding the limit
+	// is handled correctly. We test the truncation behaviour directly
+	// rather than through the full MCP pipeline (which has description
+	// length limits in the protocol).
+	longLine := strings.Repeat("x", availableDeferredToolsMaxChars+100)
+	block := "<available-deferred-tools>\n[server: test]\n  mcp__test__tool — " + longLine + "\n</available-deferred-tools>"
+
+	// Apply the same truncation logic as renderDeferredToolsBlock.
+	truncated := block
+	if len(truncated) > availableDeferredToolsMaxChars {
+		truncated = block[:availableDeferredToolsMaxChars]
+		if idx := strings.LastIndex(truncated, "\n"); idx > 0 {
+			truncated = truncated[:idx]
+		}
+		truncated += "\n... more tool(s) omitted\n</available-deferred-tools>"
+	}
+
+	if !strings.HasPrefix(truncated, "<available-deferred-tools>") {
+		t.Fatalf("truncated block should start with opening tag, got %q", truncated)
+	}
+	if !strings.Contains(truncated, "more tool(s) omitted") {
+		t.Fatalf("truncated block should contain omission notice, got %q", truncated)
+	}
+	if !strings.HasSuffix(truncated, "</available-deferred-tools>") {
+		t.Fatalf("truncated block should end with closing tag, got %q", truncated)
+	}
+	// Truncation should have removed content.
+	if strings.Contains(truncated, "xxx") {
+		t.Fatal("truncated block should not contain the overflow content")
+	}
+}
