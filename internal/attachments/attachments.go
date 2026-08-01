@@ -23,6 +23,7 @@ const (
 	DefaultMaxImageBytes = 10 * 1024 * 1024
 	DefaultMaxPDFBytes   = 20 * 1024 * 1024
 	DefaultMaxAudioBytes = 25 * 1024 * 1024
+	DefaultMaxVideoBytes = 50 * 1024 * 1024
 	DefaultMaxFileBytes  = 20 * 1024 * 1024
 )
 
@@ -40,6 +41,7 @@ type Options struct {
 	MaxImageBytes  int64
 	MaxPDFBytes    int64
 	MaxAudioBytes  int64
+	MaxVideoBytes  int64
 	MaxFileBytes   int64
 }
 
@@ -214,6 +216,9 @@ func normalizeOptions(opts Options) Options {
 	if opts.MaxAudioBytes <= 0 {
 		opts.MaxAudioBytes = DefaultMaxAudioBytes
 	}
+	if opts.MaxVideoBytes <= 0 {
+		opts.MaxVideoBytes = DefaultMaxVideoBytes
+	}
 	if opts.MaxFileBytes <= 0 {
 		opts.MaxFileBytes = DefaultMaxFileBytes
 	}
@@ -231,6 +236,8 @@ func classifyAttachment(path string, header []byte) (core.AttachmentKind, string
 		return core.AttachmentKindImage, mime
 	case "audio/mpeg", "audio/wave", "audio/wav", "audio/x-wav", "audio/ogg", "audio/flac", "audio/webm":
 		return core.AttachmentKindAudio, mime
+	case "video/mp4", "video/quicktime", "video/webm", "video/x-msvideo":
+		return core.AttachmentKindVideo, mime
 	}
 	switch ext {
 	case "png":
@@ -252,7 +259,16 @@ func classifyAttachment(path string, header []byte) (core.AttachmentKind, string
 	case "flac":
 		return core.AttachmentKindAudio, "audio/flac"
 	case "webm":
+		if strings.HasPrefix(mime, "video/") {
+			return core.AttachmentKindVideo, mime
+		}
 		return core.AttachmentKindAudio, "audio/webm"
+	case "mp4":
+		return core.AttachmentKindVideo, "video/mp4"
+	case "mov":
+		return core.AttachmentKindVideo, "video/quicktime"
+	case "avi":
+		return core.AttachmentKindVideo, "video/x-msvideo"
 	}
 	if mime == "application/octet-stream" && ext != "" {
 		return core.AttachmentKindFile, mimeFromExtension(ext)
@@ -285,6 +301,8 @@ func maxBytesForKind(kind core.AttachmentKind, opts Options) int64 {
 		return opts.MaxPDFBytes
 	case core.AttachmentKindAudio:
 		return opts.MaxAudioBytes
+	case core.AttachmentKindVideo:
+		return opts.MaxVideoBytes
 	default:
 		return opts.MaxFileBytes
 	}

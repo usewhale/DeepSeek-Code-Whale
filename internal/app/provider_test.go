@@ -138,6 +138,64 @@ func TestNewDeepSeekProviderKeepsMissingMultimodalAPIKeyEnvError(t *testing.T) {
 	}
 }
 
+func TestNewMiniMaxProviderUsesConfiguredEndpoint(t *testing.T) {
+	var sawRequest bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawRequest = true
+		if r.URL.Path != "/chat/completions" {
+			t.Fatalf("unexpected request path: %s", r.URL.Path)
+		}
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		if payload["model"] != "MiniMax-M3" {
+			t.Fatalf("model = %v, want MiniMax-M3", payload["model"])
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n")
+		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	provider, err := newProvider(providerOptions{
+		Provider: "minimax",
+		MiniMax: MiniMaxProviderConfig{
+			APIKey:  "test-minimax-key",
+			BaseURL: srv.URL,
+		},
+		Model: "MiniMax-M3",
+	})
+	if err != nil {
+		t.Fatalf("newProvider: %v", err)
+	}
+	for ev := range provider.StreamResponse(context.Background(), []core.Message{{Role: core.RoleUser, Text: "hi"}}, nil) {
+		if ev.Type == llm.EventError {
+			t.Fatalf("provider error: %v", ev.Err)
+		}
+	}
+	if !sawRequest {
+		t.Fatal("expected request to configured base URL")
+	}
+}
+
+func TestNewMiniMaxProviderUsesRegionalDefaultEndpoint(t *testing.T) {
+	_, err := newProvider(providerOptions{
+		Provider: "minimax",
+		MiniMax: MiniMaxProviderConfig{
+			APIKey: "test-minimax-key",
+			Region: "cn_zh",
+		},
+		Model: "MiniMax-M2.7",
+	})
+	if err != nil {
+		t.Fatalf("newProvider: %v", err)
+	}
+	if got := minimaxBaseURLForRegion("cn_zh"); got != "https://api.minimaxi.com/v1" {
+		t.Fatalf("regional endpoint = %s", got)
+	}
+}
+
 func TestTaskProviderUsesConfiguredRetryPolicy(t *testing.T) {
 	t.Setenv("DEEPSEEK_API_KEY", "test-key")
 	var parentRequests atomic.Int32

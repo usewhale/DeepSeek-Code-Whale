@@ -67,6 +67,7 @@ const (
 	AttachmentKindImage AttachmentKind = "image"
 	AttachmentKindPDF   AttachmentKind = "pdf"
 	AttachmentKindAudio AttachmentKind = "audio"
+	AttachmentKindVideo AttachmentKind = "video"
 	AttachmentKindFile  AttachmentKind = "file"
 )
 

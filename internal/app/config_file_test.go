@@ -157,6 +157,52 @@ func TestApplyFileConfigSupportsDeepSeekMultimodalProvider(t *testing.T) {
 	}
 }
 
+func TestApplyFileConfigSupportsMiniMaxProvider(t *testing.T) {
+	cfg := DefaultConfig()
+	if err := ApplyFileConfig(&cfg, FileConfig{
+		Provider: " MiniMax ",
+		Model:    "MiniMax-M3",
+		Providers: FileProvidersConfig{
+			MiniMax: FileMiniMaxProviderConfig{
+				Region:    "CN_ZH",
+				BaseURL:   "https://api.minimaxi.com/v1/",
+				APIKey:    "test-minimax-key",
+				APIKeyEnv: "MINIMAX_TEST_KEY",
+			},
+		},
+	}); err != nil {
+		t.Fatalf("ApplyFileConfig: %v", err)
+	}
+	if cfg.Provider != "minimax" ||
+		cfg.Model != "MiniMax-M3" ||
+		cfg.MiniMax.Region != "cn_zh" ||
+		cfg.MiniMax.BaseURL != "https://api.minimaxi.com/v1" ||
+		cfg.MiniMax.APIKey != "test-minimax-key" ||
+		cfg.MiniMax.APIKeyEnv != "MINIMAX_TEST_KEY" {
+		t.Fatalf("minimax config: %+v", cfg)
+	}
+}
+
+func TestMiniMaxProviderUsesProviderDefaultModel(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Provider = "minimax"
+	loaded, err := LoadAndApplyConfig(cfg, t.TempDir())
+	if err != nil {
+		t.Fatalf("LoadAndApplyConfig: %v", err)
+	}
+	if defaultModelForProvider(loaded.Provider) != "MiniMax-M3" {
+		t.Fatalf("provider default model = %s", defaultModelForProvider(loaded.Provider))
+	}
+}
+
+func TestApplyFileConfigRejectsInvalidProvider(t *testing.T) {
+	cfg := DefaultConfig()
+	err := ApplyFileConfig(&cfg, FileConfig{Provider: "missing"})
+	if err == nil || !strings.Contains(err.Error(), "invalid provider") {
+		t.Fatalf("error = %v, want invalid provider", err)
+	}
+}
+
 func TestApplyFileConfigRejectsInvalidDeepSeekMultimodalCompat(t *testing.T) {
 	cfg := DefaultConfig()
 	enabled := true

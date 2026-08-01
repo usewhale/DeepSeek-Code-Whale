@@ -19,6 +19,7 @@ const (
 )
 
 type FileConfig struct {
+	Provider        string `toml:"provider,omitempty"`
 	Model           string `toml:"model,omitempty"`
 	ReasoningEffort string `toml:"reasoning_effort,omitempty"`
 	ThinkingEnabled *bool  `toml:"thinking_enabled,omitempty"`
@@ -71,10 +72,18 @@ type FileAPIConfig struct {
 
 type FileProvidersConfig struct {
 	DeepSeek FileDeepSeekProviderConfig `toml:"deepseek,omitempty"`
+	MiniMax  FileMiniMaxProviderConfig  `toml:"minimax,omitempty"`
 }
 
 type FileDeepSeekProviderConfig struct {
 	Multimodal FileMultimodalProviderConfig `toml:"multimodal,omitempty"`
+}
+
+type FileMiniMaxProviderConfig struct {
+	Region    string `toml:"region,omitempty"`
+	BaseURL   string `toml:"base_url,omitempty"`
+	APIKey    string `toml:"api_key,omitempty"`
+	APIKeyEnv string `toml:"api_key_env,omitempty"`
 }
 
 type FileMultimodalProviderConfig struct {

@@ -250,6 +250,13 @@ func encodeOpenAIAttachment(att *core.AttachmentRef) (map[string]any, error) {
 				"format": format,
 			},
 		}, nil
+	case core.AttachmentKindVideo:
+		return map[string]any{
+			"type": "video_url",
+			"video_url": map[string]any{
+				"url": dataURL(mime, encoded),
+			},
+		}, nil
 	default:
 		return nil, fmt.Errorf("unsupported attachment kind %q", att.Kind)
 	}

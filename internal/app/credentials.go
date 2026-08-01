@@ -15,6 +15,7 @@ var deepSeekAPIKeyPattern = regexp.MustCompile(`^sk-[A-Za-z0-9_-]{16,}$`)
 
 type Credentials struct {
 	DeepSeekAPIKey string `json:"deepseek_api_key,omitempty"`
+	MiniMaxAPIKey  string `json:"minimax_api_key,omitempty"`
 }
 
 func credentialsPath(dataDir string) string {
@@ -69,4 +70,15 @@ func LoadDeepSeekAPIKey(dataDir string) (string, error) {
 		return "", err
 	}
 	return strings.TrimSpace(creds.DeepSeekAPIKey), nil
+}
+
+func LoadMiniMaxAPIKey(dataDir string) (string, error) {
+	if v := strings.TrimSpace(os.Getenv("MINIMAX_API_KEY")); v != "" {
+		return v, nil
+	}
+	creds, err := LoadCredentials(dataDir)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(creds.MiniMaxAPIKey), nil
 }

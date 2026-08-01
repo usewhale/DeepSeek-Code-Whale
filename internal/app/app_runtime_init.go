@@ -16,7 +16,12 @@ import (
 )
 
 func initAppRuntime(cfg Config, sessionInit appSessionInit, toolInit appToolInit, workspaceRoot, worktreeRoot string, parentSessionIDFunc func() string, approvalFunc policy.ApprovalFunc) (appRuntimeInit, error) {
-	model := core.FirstNonEmpty(strings.TrimSpace(cfg.Model), defaults.DefaultModel)
+	modelDefault := core.FirstNonEmpty(defaultModelForProvider(cfg.Provider), defaults.DefaultModel)
+	model := core.FirstNonEmpty(strings.TrimSpace(cfg.Model), modelDefault)
+	if strings.EqualFold(strings.TrimSpace(cfg.Provider), "minimax") && !cfg.ModelExplicit && model == defaults.DefaultModel {
+		model = modelDefault
+		cfg.Model = model
+	}
 	effort := normalizeEffort(core.FirstNonEmpty(strings.TrimSpace(cfg.ReasoningEffort), defaults.DefaultReasoningEffort))
 	viewMode, err := NormalizeViewMode(cfg.ViewMode)
 	if err != nil {
@@ -28,6 +33,13 @@ func initAppRuntime(cfg Config, sessionInit appSessionInit, toolInit appToolInit
 	apiKey, err := LoadDeepSeekAPIKey(cfg.DataDir)
 	if err != nil {
 		return appRuntimeInit{}, fmt.Errorf("load api key failed: %w", err)
+	}
+	miniMaxAPIKey, err := LoadMiniMaxAPIKey(cfg.DataDir)
+	if err != nil {
+		return appRuntimeInit{}, fmt.Errorf("load minimax api key failed: %w", err)
+	}
+	if strings.TrimSpace(cfg.MiniMax.APIKey) == "" {
+		cfg.MiniMax.APIKey = miniMaxAPIKey
 	}
 	toolInit.toolset.SetExecBoundaryPolicy(policy.RulePolicy{
 		Default:       cfg.PermissionDefault,
@@ -42,10 +54,13 @@ func initAppRuntime(cfg Config, sessionInit appSessionInit, toolInit appToolInit
 	}))
 	providerFactory := func(model string, maxTokens int) (llm.Provider, error) {
 		if strings.TrimSpace(model) == "" {
-			model = defaults.DefaultModel
+			model = modelDefault
 		}
-		return newDeepSeekProvider(providerOptions{
+		return newProvider(providerOptions{
+			Provider:                 cfg.Provider,
 			APIKey:                   apiKey,
+			MiniMaxAPIKey:            miniMaxAPIKey,
+			MiniMax:                  cfg.MiniMax,
 			BaseURL:                  cfg.APIBaseURL,
 			Model:                    model,
 			ReasoningEffort:          effort,
@@ -61,11 +76,14 @@ func initAppRuntime(cfg Config, sessionInit appSessionInit, toolInit appToolInit
 	providerFactoryWithOptions := func(req tasks.ProviderRequest) (llm.Provider, error) {
 		model := strings.TrimSpace(req.Model)
 		if model == "" {
-			model = defaults.DefaultModel
+			model = modelDefault
 		}
 		reqEffort := normalizeEffort(core.FirstNonEmpty(strings.TrimSpace(req.Effort), effort))
-		return newDeepSeekProvider(providerOptions{
+		return newProvider(providerOptions{
+			Provider:                 cfg.Provider,
 			APIKey:                   apiKey,
+			MiniMaxAPIKey:            miniMaxAPIKey,
+			MiniMax:                  cfg.MiniMax,
 			BaseURL:                  cfg.APIBaseURL,
 			Model:                    model,
 			ReasoningEffort:          reqEffort,
@@ -125,7 +143,7 @@ func initAppRuntime(cfg Config, sessionInit appSessionInit, toolInit appToolInit
 		ExtraSkills:                extraSkills,
 		AutoCompact:                cfg.AutoCompact,
 		AutoCompactThreshold:       cfg.AutoCompactThreshold,
-		DefaultModel:               defaults.DefaultModel,
+		DefaultModel:               modelDefault,
 		DefaultMaxTokens:           tasks.DefaultMaxTokens,
 		DefaultMaxToolIters:        tasks.DefaultMaxToolIters,
 		SummaryMaxChars:            tasks.DefaultSummaryMaxChar,
