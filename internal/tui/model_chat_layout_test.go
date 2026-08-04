@@ -121,9 +121,31 @@ func TestChatFooterShowsAutoAcceptOnlyWhenEnabled(t *testing.T) {
 	view = m.View()
 	assertFooterLastLine(t, view, "auto-accept on")
 }
-func TestChatFooterShowsGitBranchInsteadOfScrollHint(t *testing.T) {
+func TestChatFooterShowsPermissionStateAndCycleHint(t *testing.T) {
 	m := newModel(nil, "deepseek-v4-pro", "high", "on")
 	m.width = 100
+	m.height = 24
+	m.cwd = "~/Engineer/ai/dsk/whale"
+
+	view := m.View()
+	assertFooterLastLine(t, view, "permission: ask")
+	assertFooterLastLine(t, view, "Alt+P to cycle")
+
+	m.autoReviewEnabled = true
+	view = m.View()
+	assertFooterLastLine(t, view, "auto-review")
+	assertFooterLastLine(t, view, "Alt+P to cycle")
+
+	m.autoReviewEnabled = false
+	m.autoAccept = true
+	view = m.View()
+	assertFooterLastLine(t, view, "auto-accept on")
+	assertFooterLastLine(t, view, "Alt+P to cycle")
+}
+
+func TestChatFooterShowsGitBranchInsteadOfScrollHint(t *testing.T) {
+	m := newModel(nil, "deepseek-v4-pro", "high", "on")
+	m.width = 140
 	m.height = 24
 	m.cwd = "~/Engineer/ai/dsk/whale-footer-branch-display"
 	m.gitBranch = "feat/footer-branch"
@@ -135,7 +157,7 @@ func TestChatFooterShowsGitBranchInsteadOfScrollHint(t *testing.T) {
 }
 func TestChatFooterOmitsEmptyGitBranch(t *testing.T) {
 	m := newModel(nil, "deepseek-v4-pro", "high", "on")
-	m.width = 100
+	m.width = 120
 	m.height = 24
 	m.cwd = "~/Engineer/ai/dsk/whale-footer-branch-display"
 
@@ -145,7 +167,7 @@ func TestChatFooterOmitsEmptyGitBranch(t *testing.T) {
 }
 func TestChatFooterLongGitBranchDoesNotHideDirectory(t *testing.T) {
 	m := newModel(nil, "deepseek-v4-pro", "high", "on")
-	m.width = 80
+	m.width = 100
 	m.height = 24
 	m.cwd = "~/Engineer/ai/dsk/whale-footer-branch-display"
 	m.gitBranch = "feat/this-is-an-extremely-long-branch-name-that-cannot-fit-in-the-footer"
@@ -157,7 +179,7 @@ func TestChatFooterLongGitBranchDoesNotHideDirectory(t *testing.T) {
 }
 func TestChatFooterKeepsFocusIndicatorWithGitBranch(t *testing.T) {
 	m := newModel(nil, "deepseek-v4-pro", "high", "on")
-	m.width = 100
+	m.width = 130
 	m.height = 24
 	m.viewMode = protocol.ViewModeFocus
 	m.cwd = "/Users/goranka/Engineer/ai/dsk/whale-output-mouse-copy"

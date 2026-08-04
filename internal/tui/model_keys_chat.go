@@ -25,6 +25,16 @@ func (m *model) handleChatModeKey(msg tea.KeyMsg) (tea.Cmd, bool) {
 			m.dispatchIntent(protocol.Intent{Kind: protocol.IntentToggleMode})
 			return nil, true
 		}
+	case "alt+p", "meta+p":
+		if m.localSubmitPending > 0 {
+			m.status = "wait for command to finish"
+			m.refreshViewportContent()
+			return m.flushNativeScrollbackCmd(), true
+		}
+		if !m.hasSlashSuggestions() && !m.hasFilePanel() && !m.hasSkillSuggestions() {
+			m.cyclePermissions()
+			return nil, true
+		}
 	case "up":
 		if m.hasSlashSuggestions() {
 			if m.slash.selected > 0 {
@@ -117,6 +127,27 @@ func (m *model) handleChatModeKey(msg tea.KeyMsg) (tea.Cmd, bool) {
 		return m.handleViewportScrollKey(msg.String()), true
 	}
 	return nil, false
+}
+
+// cyclePermissions advances the permission mode with the Alt+P shortcut:
+// ask -> auto-review -> auto-accept -> ask. Local state is updated
+// optimistically so the footer indicator responds instantly; the service
+// confirms the same state via EventInfo (AutoAcceptKnown).
+func (m *model) cyclePermissions() {
+	switch nextPermissionsMode(m.autoAccept, m.autoReviewEnabled) {
+	case "auto-review":
+		m.dispatchIntent(protocol.Intent{Kind: protocol.IntentSetAutoReview, AutoReview: true})
+		m.autoReviewEnabled = true
+		m.autoAccept = false
+	case "auto-accept":
+		m.dispatchIntent(protocol.Intent{Kind: protocol.IntentSetApprovalMode, ApprovalMode: "auto_accept"})
+		m.autoAccept = true
+		m.autoReviewEnabled = false
+	default: // ask
+		m.dispatchIntent(protocol.Intent{Kind: protocol.IntentSetApprovalMode, ApprovalMode: "ask"})
+		m.autoAccept = false
+		m.autoReviewEnabled = false
+	}
 }
 
 func (m *model) handleDiffPageKey(msg tea.KeyMsg) tea.Cmd {

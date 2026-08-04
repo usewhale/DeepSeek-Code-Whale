@@ -130,15 +130,15 @@ func TestSuggestionsRenderAboveComposerBoundary(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			m := newModel(nil, "deepseek-v4-pro", "normal", "on")
-			m.width = 80
+			m.width = 100
 			m.height = 24
 			m.cwd = "~/Engineer/ai/dsk/whale"
 			tt.setup(&m)
 
-			bottom := xansi.Strip(m.renderBottom(80))
+			bottom := xansi.Strip(m.renderBottom(100))
 			lines := strings.Split(strings.TrimRight(bottom, "\n"), "\n")
 			suggestionIdx := firstLineContaining(lines, tt.panelText)
-			boundaryIdx := firstFullWidthBoundaryLine(lines, 80)
+			boundaryIdx := firstFullWidthBoundaryLine(lines, 100)
 			composerIdx := firstLineContaining(lines, tt.inputText)
 			footerIdx := len(lines) - 1
 
@@ -1160,7 +1160,7 @@ func TestEnterWhileBusyBlocksSlashCommandsWithoutQueueing(t *testing.T) {
 }
 func TestChatFooterFollowsContentAfterSlashSuggestionsClose(t *testing.T) {
 	m := newModel(nil, "deepseek-v4-pro", "normal", "on")
-	m.width = 80
+	m.width = 100
 	m.height = 24
 	m.cwd = "~/Engineer/ai/dsk/whale"
 

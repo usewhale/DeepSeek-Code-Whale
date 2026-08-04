@@ -1939,7 +1939,7 @@ func TestCtrlCWhileBusyClearsDraftAndPendingWindowsEnter(t *testing.T) {
 }
 func TestChatFooterShowsWindowsDirectoryTail(t *testing.T) {
 	m := newModel(nil, "deepseek-v4-pro", "high", "on")
-	m.width = 80
+	m.width = 100
 	m.height = 24
 	m.cwd = `C:\Users\goranka`
 
