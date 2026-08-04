@@ -54,15 +54,22 @@ func TestAltPCyclesPermissionModes(t *testing.T) {
 	}
 }
 
-func TestAltPCyclesWhileBusy(t *testing.T) {
+func TestAltPBlockedWhileBusy(t *testing.T) {
 	m, intents := newModelWithDispatchSpy()
 	m.busy = true
 	m.busySince = time.Now().Add(-5 * time.Minute)
+	m.status = "running"
 
 	m, _ = updateTestModel(t, m, altPKey())
 
-	if len(*intents) != 1 || (*intents)[0].Kind != protocol.IntentSetAutoReview {
-		t.Fatalf("expected permission cycle to work while busy, got %+v", *intents)
+	if len(*intents) != 0 {
+		t.Fatalf("busy turn should block permission cycle, got %+v", *intents)
+	}
+	if !m.busy {
+		t.Fatal("busy turn should remain busy after blocked Alt+P")
+	}
+	if m.status != "running" {
+		t.Fatalf("busy turn status should be preserved, got %q", m.status)
 	}
 }
 

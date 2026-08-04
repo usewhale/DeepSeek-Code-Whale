@@ -31,7 +31,12 @@ func (m *model) handleChatModeKey(msg tea.KeyMsg) (tea.Cmd, bool) {
 			m.refreshViewportContent()
 			return m.flushNativeScrollbackCmd(), true
 		}
-		if !m.hasSlashSuggestions() && !m.hasFilePanel() && !m.hasSkillSuggestions() {
+		// Blocked while busy: the permission intents emit EventTurnDone, which
+		// the TUI treats as turn completion — dispatching mid-turn would commit
+		// the live transcript and clear busy while the backend keeps streaming.
+		// Mid-turn auto-accept is still available from the approval modal
+		// (approve + enable auto-accept), which uses a quiet intent path.
+		if !m.busy && !m.hasSlashSuggestions() && !m.hasFilePanel() && !m.hasSkillSuggestions() {
 			m.cyclePermissions()
 			return nil, true
 		}
