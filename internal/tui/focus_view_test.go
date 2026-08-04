@@ -1301,7 +1301,7 @@ func TestFocusFooterIndicatorSurvivesLongDirectory(t *testing.T) {
 	m := newModel(nil, "deepseek-v4-pro", "high", "on")
 	m.viewMode = protocol.ViewModeFocus
 	m.cwd = "/Users/goranka/Engineer/ai/dsk/whale-output-mouse-copy"
-	m.width = 72
+	m.width = 90
 	m.height = 12
 
 	lines := strings.Split(m.View(), "\n")

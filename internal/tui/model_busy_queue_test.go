@@ -1276,7 +1276,7 @@ func TestChatBusyViewShowsWorkingAboveComposer(t *testing.T) {
 
 func TestBusyQueueAndFooterStayOutsideComposerBlock(t *testing.T) {
 	m := newModel(nil, "deepseek-v4-flash", "high", "on")
-	m.width = 100
+	m.width = 110
 	m.height = 24
 	m.cwd = "~/Engineer/ai/dsk/whale"
 	m.gitBranch = "feat/composer-redesign"
@@ -1285,11 +1285,11 @@ func TestBusyQueueAndFooterStayOutsideComposerBlock(t *testing.T) {
 	m.input.SetValue("editable follow-up")
 	m.queuedPrompts = []queuedPrompt{{Text: "first queued prompt"}, {Text: "second queued prompt"}}
 
-	bottom := ansi.Strip(m.renderBottom(100))
+	bottom := ansi.Strip(m.renderBottom(110))
 	lines := strings.Split(strings.TrimRight(bottom, "\n"), "\n")
 	busyIdx := firstLineContaining(lines, "Working (12s)")
 	queueIdx := firstLineContaining(lines, "queued follow-up (2)")
-	boundaryIdx := firstFullWidthBoundaryLine(lines, 100)
+	boundaryIdx := firstFullWidthBoundaryLine(lines, 110)
 	composerIdx := firstLineContaining(lines, "editable follow-up")
 	footerIdx := len(lines) - 1
 
