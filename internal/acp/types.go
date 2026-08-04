@@ -254,13 +254,20 @@ type NewSessionResponse struct {
 
 // MCPServer describes an MCP server the client wants the agent to connect to.
 type MCPServer struct {
-	Type    string            `json:"type"` // "stdio", "http", "sse"
-	Name    string            `json:"name"`
-	Command string            `json:"command,omitempty"`
-	Args    []string          `json:"args,omitempty"`
-	Env     map[string]string `json:"env,omitempty"`
-	URL     string            `json:"url,omitempty"`
-	Headers []HTTPHeader      `json:"headers,omitempty"`
+	Type    string        `json:"type"` // "stdio", "http", "sse"
+	Name    string        `json:"name"`
+	Command string        `json:"command,omitempty"`
+	Args    []string      `json:"args,omitempty"`
+	Env     []EnvVariable `json:"env,omitempty"`
+	URL     string        `json:"url,omitempty"`
+	Headers []HTTPHeader  `json:"headers,omitempty"`
+}
+
+// EnvVariable is a name/value pair for environment variables in the ACP
+// mcpServers protocol shape (array of {name, value} objects).
+type EnvVariable struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
 }
 
 // HTTPHeader is a name/value pair for HTTP MCP transports.
