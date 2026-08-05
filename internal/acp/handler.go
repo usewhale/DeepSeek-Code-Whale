@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/usewhale/whale/internal/agent"
 	"github.com/usewhale/whale/internal/core"
@@ -72,6 +73,37 @@ type sessionContext struct {
 	runs           map[*promptRun]struct{} // in-flight prompts, guarded by Handler.mu
 	cwd            string
 	mode           session.Mode
+	lastUsed       time.Time // guarded by Handler.mu, for LRU eviction
+}
+
+// maxLiveSessions bounds concurrently live sessions. ACP v1 has no
+// session/delete, so without a cap a long-lived host that keeps creating
+// sessions would leak runtimes and connected MCP servers.
+const maxLiveSessions = 64
+
+// evictIfOverLimit removes the least-recently-used session when live sessions
+// exceed maxLiveSessions, returning its runtime so the caller can release it
+// (e.g. close MCP servers) outside the handler lock.
+func (h *Handler) evictIfOverLimit() *SessionRuntime {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if len(h.sessions) <= maxLiveSessions {
+		return nil
+	}
+	var oldestID string
+	var oldest time.Time
+	for id, sctx := range h.sessions {
+		if oldestID == "" || sctx.lastUsed.Before(oldest) {
+			oldestID, oldest = id, sctx.lastUsed
+		}
+	}
+	if oldestID == "" {
+		return nil
+	}
+	rt := h.sessions[oldestID].runtime
+	delete(h.sessions, oldestID)
+	Logger.Printf("evicting least-recently-used session %s (live sessions exceed %d)", oldestID, maxLiveSessions)
+	return rt
 }
 
 func NewHandler(transport *Transport, msgStore store.MessageStore, defaultCwd string) *Handler {
@@ -309,8 +341,11 @@ func (h *Handler) handleSessionNew(req *RPCRequest) *RPCErrorResponse {
 		return NewErrorResponse(req.ID, ErrCodeInternal, fmt.Sprintf("failed to initialize session: %v", err))
 	}
 	h.mu.Lock()
-	h.sessions[whaleSessionID] = &sessionContext{whaleSessionID: whaleSessionID, runtime: rt, cwd: cwd, mode: session.ModeAgent}
+	h.sessions[whaleSessionID] = &sessionContext{whaleSessionID: whaleSessionID, runtime: rt, cwd: cwd, mode: session.ModeAgent, lastUsed: time.Now()}
 	h.mu.Unlock()
+	if evicted := h.evictIfOverLimit(); evicted != nil && evicted.Close != nil {
+		evicted.Close()
+	}
 	h.saveSessionMeta(whaleSessionID, sessionMeta{Cwd: cwd, Mode: session.ModeAgent})
 	Logger.Printf("new session: acp=%s cwd=%s", whaleSessionID, cwd)
 	h.transport.SendResponse(NewSuccessResponse(req.ID, NewSessionResponse{
@@ -360,6 +395,9 @@ func (h *Handler) handleSessionLoad(req *RPCRequest) *RPCErrorResponse {
 	}
 	h.mu.Lock()
 	_, exists := h.sessions[params.SessionID]
+	if exists {
+		h.sessions[params.SessionID].lastUsed = time.Now()
+	}
 	h.mu.Unlock()
 	if !exists {
 		rt, err := h.buildRuntime(params.SessionID, cwd, params.MCPServers)
@@ -369,9 +407,12 @@ func (h *Handler) handleSessionLoad(req *RPCRequest) *RPCErrorResponse {
 		h.mu.Lock()
 		// Re-check under lock in case a concurrent load created it first.
 		if _, exists := h.sessions[params.SessionID]; !exists {
-			h.sessions[params.SessionID] = &sessionContext{whaleSessionID: params.SessionID, runtime: rt, cwd: cwd, mode: mode}
+			h.sessions[params.SessionID] = &sessionContext{whaleSessionID: params.SessionID, runtime: rt, cwd: cwd, mode: mode, lastUsed: time.Now()}
 		}
 		h.mu.Unlock()
+		if evicted := h.evictIfOverLimit(); evicted != nil && evicted.Close != nil {
+			evicted.Close()
+		}
 		// Persist the resolved cwd/mode so a subsequent load (or a restart where
 		// the sidecar was never written) stays consistent with the runtime we
 		// just built. An already-live session keeps its established runtime, so

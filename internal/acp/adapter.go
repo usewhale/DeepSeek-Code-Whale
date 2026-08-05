@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/usewhale/whale/internal/agent"
 	"github.com/usewhale/whale/internal/core"
@@ -30,6 +31,9 @@ func (h *Handler) handlePrompt(req *RPCRequest) *RPCErrorResponse {
 	// Look up session context.
 	h.mu.Lock()
 	sctx, ok := h.sessions[params.SessionID]
+	if ok {
+		sctx.lastUsed = time.Now()
+	}
 	h.mu.Unlock()
 	if !ok {
 		return NewErrorResponse(req.ID, ErrCodeInvalidParams, fmt.Sprintf("session not found: %s", params.SessionID))

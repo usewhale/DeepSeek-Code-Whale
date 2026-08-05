@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/usewhale/whale/internal/store"
 )
@@ -99,5 +100,60 @@ func TestCloseSessionsInvokesRuntimeClose(t *testing.T) {
 	h.CloseSessions()
 	if closed != 1 {
 		t.Fatalf("expected runtime Close hook to run once, got %d", closed)
+	}
+}
+
+// TestBoundSessionsEvictsLRU verifies that live sessions are capped at
+// maxLiveSessions and the least-recently-used session is evicted (its runtime
+// Close hook released) when the cap is exceeded. ACP v1 has no session/delete,
+// so this bounds runtime and MCP-server leakage on long-lived hosts.
+func TestBoundSessionsEvictsLRU(t *testing.T) {
+	closed := 0
+	h := newHandlerForTest(t, &factoryRecorder{closeFn: func() { closed++ }})
+
+	// Create the first session and mark it as the oldest.
+	h.handleRequest(&RPCRequest{
+		JSONRPC: "2.0",
+		ID:      &RequestID{Value: 1},
+		Method:  MethodSessionNew,
+		Params:  json.RawMessage(`{"cwd": "/work"}`),
+	})
+	var firstID string
+	h.mu.Lock()
+	for id := range h.sessions {
+		firstID = id
+		break
+	}
+	h.sessions[firstID].lastUsed = time.Now().Add(-time.Hour)
+	h.mu.Unlock()
+
+	// Fill to the cap (1 + maxLiveSessions - 1 = maxLiveSessions).
+	for i := 0; i < maxLiveSessions-1; i++ {
+		h.handleRequest(&RPCRequest{
+			JSONRPC: "2.0",
+			ID:      &RequestID{Value: 2 + i},
+			Method:  MethodSessionNew,
+			Params:  json.RawMessage(`{"cwd": "/work"}`),
+		})
+	}
+	if got := len(h.sessions); got != maxLiveSessions {
+		t.Fatalf("expected %d live sessions, got %d", maxLiveSessions, got)
+	}
+
+	// One more session exceeds the cap and evicts the marked oldest.
+	h.handleRequest(&RPCRequest{
+		JSONRPC: "2.0",
+		ID:      &RequestID{Value: 100},
+		Method:  MethodSessionNew,
+		Params:  json.RawMessage(`{"cwd": "/work"}`),
+	})
+	if got := len(h.sessions); got != maxLiveSessions {
+		t.Fatalf("expected %d live sessions after eviction, got %d", maxLiveSessions, got)
+	}
+	if closed != 1 {
+		t.Fatalf("expected exactly 1 eviction Close call, got %d", closed)
+	}
+	if _, ok := h.sessions[firstID]; ok {
+		t.Fatal("least-recently-used session was not evicted")
 	}
 }
