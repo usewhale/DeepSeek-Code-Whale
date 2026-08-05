@@ -60,38 +60,55 @@ type ChangeSummary struct {
 	Commits      int
 }
 
-func Start(cwd, name string) (Session, error) {
+// ResolveSession computes the Session that Start would create or reuse for
+// cwd and name without performing any side effects: no worktree is added, no
+// branch is created, and no ignore-file or config changes are made. Callers
+// use it for read-only pre-validation before committing to worktree creation.
+func ResolveSession(cwd, name string) (Session, error) {
+	sess, _, err := resolveSession(cwd, name)
+	return sess, err
+}
+
+func resolveSession(cwd, name string) (Session, string, error) {
 	name = strings.TrimSpace(name)
 	if err := ValidateName(name); err != nil {
-		return Session{}, err
+		return Session{}, "", err
 	}
 	originalWorkspace, err := filepath.Abs(cwd)
 	if err != nil {
-		return Session{}, fmt.Errorf("resolve workspace: %w", err)
+		return Session{}, "", fmt.Errorf("resolve workspace: %w", err)
 	}
 	repoRoot, err := CanonicalRepoRoot(originalWorkspace)
 	if err != nil {
-		return Session{}, err
+		return Session{}, "", err
 	}
-	checkoutRoot, err := CheckoutRoot(originalWorkspace)
-	if err != nil {
-		return Session{}, err
-	}
-	workspaceRel, err := filepath.Rel(checkoutRoot, originalWorkspace)
-	if err != nil {
-		return Session{}, fmt.Errorf("resolve workspace relative path: %w", err)
-	}
-	flatName := FlattenName(name)
-	branch := BranchName(name)
-	path := filepath.Join(repoRoot, ".whale", dirName, flatName)
 	sess := Session{
 		Name:               name,
-		Path:               path,
-		Branch:             branch,
+		Path:               WorktreePath(repoRoot, name),
+		Branch:             BranchName(name),
 		OriginalWorkspace:  originalWorkspace,
 		OriginalBranch:     gitOutput(originalWorkspace, "branch", "--show-current"),
 		OriginalHeadCommit: gitOutput(originalWorkspace, "rev-parse", "HEAD"),
 	}
+	return sess, repoRoot, nil
+}
+
+func Start(cwd, name string) (Session, error) {
+	sess, repoRoot, err := resolveSession(cwd, name)
+	if err != nil {
+		return Session{}, err
+	}
+	checkoutRoot, err := CheckoutRoot(sess.OriginalWorkspace)
+	if err != nil {
+		return Session{}, err
+	}
+	workspaceRel, err := filepath.Rel(checkoutRoot, sess.OriginalWorkspace)
+	if err != nil {
+		return Session{}, fmt.Errorf("resolve workspace relative path: %w", err)
+	}
+	flatName := FlattenName(sess.Name)
+	branch := sess.Branch
+	path := sess.Path
 
 	if err := ensureManagedPathsIgnored(repoRoot, workspaceRel); err != nil {
 		return Session{}, err
@@ -118,7 +135,7 @@ func Start(cwd, name string) (Session, error) {
 		return Session{}, err
 	}
 	sess.Created = true
-	if err := copyLocalConfig(originalWorkspace, filepath.Join(path, workspaceRel)); err != nil {
+	if err := copyLocalConfig(sess.OriginalWorkspace, filepath.Join(path, workspaceRel)); err != nil {
 		return Session{}, err
 	}
 	return sess, nil

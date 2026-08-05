@@ -9,6 +9,9 @@ import (
 	"sync"
 	"testing"
 	"unicode/utf8"
+
+	"github.com/usewhale/whale/internal/session"
+	"github.com/usewhale/whale/internal/store"
 )
 
 // TestRunExecScrubsLeakedToolCallFromOutput verifies that when the model writes
@@ -81,6 +84,62 @@ func TestRunExecReturnsFinalOutput(t *testing.T) {
 	if res.Model == "" {
 		t.Fatal("expected model")
 	}
+}
+
+func TestRunExecNewSessionIDsDiffer(t *testing.T) {
+	t.Setenv("DEEPSEEK_API_KEY", "sk-1234567890abcdef1234")
+	srv := newExecEchoServer(t, "ok")
+	defer srv.Close()
+	t.Setenv("DEEPSEEK_BASE_URL", srv.URL)
+
+	cfg := DefaultConfig()
+	cfg.DataDir = t.TempDir()
+
+	first, err := RunExec(context.Background(), cfg, StartOptions{NewSession: true}, "hi")
+	if err != nil {
+		t.Fatalf("first RunExec: %v", err)
+	}
+	second, err := RunExec(context.Background(), cfg, StartOptions{NewSession: true}, "hi")
+	if err != nil {
+		t.Fatalf("second RunExec: %v", err)
+	}
+	if first.SessionID == "" || second.SessionID == "" {
+		t.Fatalf("expected non-empty session ids, got %q and %q", first.SessionID, second.SessionID)
+	}
+	if first.SessionID == second.SessionID {
+		t.Fatalf("expected a new session id per exec call, got %q twice", first.SessionID)
+	}
+}
+
+func TestRunExecNewSessionDefaultsToAgentMode(t *testing.T) {
+	t.Setenv("DEEPSEEK_API_KEY", "sk-1234567890abcdef1234")
+	srv := newExecEchoServer(t, "ok")
+	defer srv.Close()
+	t.Setenv("DEEPSEEK_BASE_URL", srv.URL)
+
+	cfg := DefaultConfig()
+	cfg.DataDir = t.TempDir()
+
+	res, err := RunExec(context.Background(), cfg, StartOptions{NewSession: true}, "hi")
+	if err != nil {
+		t.Fatalf("RunExec: %v", err)
+	}
+	st, err := session.LoadModeState(store.DefaultSessionsDir(cfg.DataDir), res.SessionID)
+	if err != nil {
+		t.Fatalf("load mode state: %v", err)
+	}
+	if st.Mode != session.ModeAgent {
+		t.Fatalf("expected new session mode to default to agent, got %q", st.Mode)
+	}
+}
+
+func newExecEchoServer(t *testing.T, content string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprintf(w, "data: {\"choices\":[{\"delta\":{\"content\":%q},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}\n\n", content)
+		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
 }
 
 func TestSummarizeExecTextPreservesUTF8(t *testing.T) {

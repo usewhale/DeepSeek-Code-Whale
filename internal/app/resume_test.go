@@ -159,7 +159,7 @@ func TestResolveResumeWorktreeReturnsSessionWorktree(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolveResumeWorktree: %v", err)
 	}
-	if got.Name != "feature" || got.Path != worktreePath || got.Branch != "worktree-feature" || got.OriginalWorkspace != "/tmp/original" {
+	if got.Session.Name != "feature" || got.Session.Path != worktreePath || got.Session.Branch != "worktree-feature" || got.Session.OriginalWorkspace != "/tmp/original" {
 		t.Fatalf("unexpected worktree session: %+v", got)
 	}
 }
@@ -185,7 +185,7 @@ func TestResolveResumeWorktreeClearsMissingPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolveResumeWorktree: %v", err)
 	}
-	if got.Path != "" {
+	if got.Session.Path != "" {
 		t.Fatalf("expected missing worktree to resume normally, got %+v", got)
 	}
 	meta, err := session.LoadSessionMeta(sessionsDir, "s1")
@@ -205,8 +205,77 @@ func TestResolveResumeWorktreeSkipsPicker(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolveResumeWorktree picker: %v", err)
 	}
-	if got.Path != "" {
+	if got.Session.Path != "" {
 		t.Fatalf("picker should not resolve worktree, got %+v", got)
+	}
+}
+
+func TestResolveResumeWorktreeDecisionIsReadOnly(t *testing.T) {
+	dataDir := t.TempDir()
+	sessionsDir := store.DefaultSessionsDir(dataDir)
+	missing := filepath.Join(t.TempDir(), "missing")
+	if err := session.SaveSessionMeta(sessionsDir, "s1", session.SessionMeta{
+		Workspace:          missing,
+		Branch:             "worktree-missing",
+		WorktreeName:       "missing",
+		WorktreePath:       missing,
+		WorktreeBranch:     "worktree-missing",
+		OriginalWorkspace:  "/tmp/original",
+		OriginalBranch:     "main",
+		OriginalHeadCommit: "abc123",
+	}); err != nil {
+		t.Fatalf("save meta: %v", err)
+	}
+	before, err := session.LoadSessionMeta(sessionsDir, "s1")
+	if err != nil {
+		t.Fatalf("load before meta: %v", err)
+	}
+
+	got, err := ResolveResumeWorktreeDecision(Config{DataDir: dataDir}, StartOptions{SessionID: "s1"}, t.TempDir())
+	if err != nil {
+		t.Fatalf("ResolveResumeWorktreeDecision: %v", err)
+	}
+	if !got.MissingWorktree {
+		t.Fatalf("expected missing-worktree intent, got %+v", got)
+	}
+	after, err := session.LoadSessionMeta(sessionsDir, "s1")
+	if err != nil {
+		t.Fatalf("load after meta: %v", err)
+	}
+	if after != before {
+		t.Fatalf("read-only decision rewrote sidecar:\nbefore: %+v\nafter:  %+v", before, after)
+	}
+}
+
+func TestCommitMissingWorktreeCleanupClearsMeta(t *testing.T) {
+	dataDir := t.TempDir()
+	sessionsDir := store.DefaultSessionsDir(dataDir)
+	missing := filepath.Join(t.TempDir(), "missing")
+	if err := session.SaveSessionMeta(sessionsDir, "s1", session.SessionMeta{
+		Workspace:          missing,
+		Branch:             "worktree-missing",
+		WorktreeName:       "missing",
+		WorktreePath:       missing,
+		WorktreeBranch:     "worktree-missing",
+		OriginalWorkspace:  "/tmp/original",
+		OriginalBranch:     "main",
+		OriginalHeadCommit: "abc123",
+	}); err != nil {
+		t.Fatalf("save meta: %v", err)
+	}
+
+	if err := CommitMissingWorktreeCleanup(sessionsDir, "s1", t.TempDir()); err != nil {
+		t.Fatalf("CommitMissingWorktreeCleanup: %v", err)
+	}
+	meta, err := session.LoadSessionMeta(sessionsDir, "s1")
+	if err != nil {
+		t.Fatalf("load meta: %v", err)
+	}
+	if meta.Workspace != "/tmp/original" || meta.Branch != "main" {
+		t.Fatalf("unexpected fallback meta: %+v", meta)
+	}
+	if meta.WorktreeName != "" || meta.WorktreePath != "" || meta.WorktreeBranch != "" || meta.OriginalWorkspace != "" || meta.OriginalBranch != "" || meta.OriginalHeadCommit != "" {
+		t.Fatalf("expected worktree meta to be cleared: %+v", meta)
 	}
 }
 

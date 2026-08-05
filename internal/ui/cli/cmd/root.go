@@ -117,16 +117,21 @@ func prepareWorktree(cmd *cobra.Command, opts *cliOptions) error {
 	if err := os.Chdir(targetWorkspace); err != nil {
 		return fmt.Errorf("enter worktree: %w", err)
 	}
-	opts.worktreeSession = app.WorktreeSession{
-		Name:               sess.Name,
-		Workspace:          targetWorkspace,
-		Path:               sess.Path,
-		Branch:             sess.Branch,
-		OriginalWorkspace:  sess.OriginalWorkspace,
-		OriginalBranch:     sess.OriginalBranch,
-		OriginalHeadCommit: sess.OriginalHeadCommit,
-	}
+	opts.worktreeSession = worktreeSessionFrom(sess)
+	opts.worktreeSession.Workspace = targetWorkspace
 	return nil
+}
+
+func worktreeSessionFrom(s whaleworktree.Session) app.WorktreeSession {
+	return app.WorktreeSession{
+		Name:               s.Name,
+		Workspace:          s.Path,
+		Path:               s.Path,
+		Branch:             s.Branch,
+		OriginalWorkspace:  s.OriginalWorkspace,
+		OriginalBranch:     s.OriginalBranch,
+		OriginalHeadCommit: s.OriginalHeadCommit,
+	}
 }
 
 func rejectWorktreeFlag(cmd *cobra.Command) error {

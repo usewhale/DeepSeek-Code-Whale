@@ -15,30 +15,54 @@ import (
 
 	"github.com/usewhale/whale/internal/app"
 	"github.com/usewhale/whale/internal/attachments"
-	"github.com/usewhale/whale/internal/core"
+	"github.com/usewhale/whale/internal/session"
+	whaleworktree "github.com/usewhale/whale/internal/worktree"
 )
 
 func newExecCmd(opts *cliOptions) *cobra.Command {
 	var jsonOutput bool
 	var timeoutSec int
 	var attachPaths []string
+	var sessionID string
+	var mode string
 	c := &cobra.Command{
 		Use:   "exec [prompt]",
 		Short: "Run a single prompt non-interactively",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := prepareWorktree(cmd, opts); err != nil {
+			err := runExecE(cmd, opts, args, jsonOutput, timeoutSec, attachPaths, sessionID, mode)
+			if err == nil || !jsonOutput {
 				return err
 			}
-			if err := prepareCLIConfig(cmd, opts); err != nil {
+			if _, ok := err.(ExitError); ok {
+				cmd.SilenceUsage = true
+				cmd.SilenceErrors = true
 				return err
 			}
-			return runExec(cmd.OutOrStdout(), cmd.ErrOrStderr(), cmd.InOrStdin(), opts, args, jsonOutput, timeoutSec, attachPaths)
+			cmd.SilenceUsage = true
+			cmd.SilenceErrors = true
+			if err := writeExecErrorJSON(cmd.OutOrStdout(), err); err != nil {
+				return err
+			}
+			return ExitError{Code: 1}
 		},
 	}
 	c.Flags().BoolVar(&jsonOutput, "json", false, "Emit machine-readable JSON output")
 	c.Flags().IntVar(&timeoutSec, "timeout-sec", 0, "Optional timeout in seconds for this exec run")
 	c.Flags().StringArrayVar(&attachPaths, "attach", nil, "Attach a local file to the prompt")
+	c.Flags().StringVar(&sessionID, "session", "", "Resume an existing session by id (default: create a new session)")
+	c.Flags().StringVar(&mode, "mode", "", "Run in a specific mode (agent|ask|plan); overrides the session's saved mode for this run and persists on resume (default: agent for new sessions)")
+	c.Long = `Run a single prompt non-interactively and exit.
+
+Session and mode:
+  --session ID   Resume an existing session so later rounds share its history.
+                 A worktree attached to the session is re-entered; an explicit
+                 --worktree must match the session's record.
+  --mode MODE    Run this round as agent, ask, or plan. When resuming, an
+                 explicit mode overrides the session's saved mode and is saved
+                 for later rounds; without it the saved mode is kept (missing
+                 defaults to agent).
+`
 	return c
 }
 
@@ -98,19 +122,17 @@ func prepareResumeWorktree(args []string, last bool, opts *cliOptions) error {
 	if err != nil {
 		return err
 	}
-	sess, err := app.ResolveResumeWorktree(opts.cfg, start, workspaceRoot)
+	decision, err := app.ResolveResumeWorktree(opts.cfg, start, workspaceRoot)
 	if err != nil {
 		return err
 	}
+	sess := decision.Session
 	if strings.TrimSpace(sess.Path) == "" {
 		return nil
 	}
-	targetWorkspace := sess.Path
-	if workspace := strings.TrimSpace(sess.Workspace); workspace != "" {
-		inside, err := core.PathInside(workspace, sess.Path)
-		if err == nil && inside {
-			targetWorkspace = workspace
-		}
+	targetWorkspace := decision.TargetWorkspace
+	if strings.TrimSpace(targetWorkspace) == "" {
+		targetWorkspace = sess.Path
 	}
 	if err := os.Chdir(targetWorkspace); err != nil {
 		return fmt.Errorf("enter resume worktree: %w", err)
@@ -213,12 +235,97 @@ func doctorBadge(level app.DoctorLevel) string {
 	}
 }
 
-func runExec(out io.Writer, errOut io.Writer, in io.Reader, opts *cliOptions, args []string, jsonOutput bool, timeoutSec int, attachPaths []string) error {
+func runExecE(cmd *cobra.Command, opts *cliOptions, args []string, jsonOutput bool, timeoutSec int, attachPaths []string, sessionID, mode string) error {
+	if flagChanged(cmd, "mode") {
+		trimmed := strings.TrimSpace(mode)
+		if trimmed == "" {
+			return &app.InvalidModeError{Value: mode}
+		}
+		if _, err := session.ParseMode(mode); err != nil {
+			return &app.InvalidModeError{Value: mode}
+		}
+	}
+	currentWorkspace, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("get workspace: %w", err)
+	}
+	// Read-only resume pre-validation before any side effect: the strict
+	// session contract, the cross-workspace gate, and the explicit-worktree
+	// match are all checked here, with the would-be worktree path resolved
+	// without creating a branch, worktree, or ignore-file change.
+	// prepareWorktree below creates an explicit worktree only after these
+	// checks have passed.
+	var target app.ResumeWorktreeDecision
+	if sid := strings.TrimSpace(sessionID); sid != "" {
+		start := app.StartOptions{SessionID: sid, ModeOverride: mode}
+		if worktreeFlagChanged(cmd) {
+			sess, err := whaleworktree.ResolveSession(currentWorkspace, opts.worktreeName)
+			if err != nil {
+				return err
+			}
+			start.Worktree = worktreeSessionFrom(sess)
+		}
+		target, err = app.ValidateResumeTarget(opts.cfg, start, currentWorkspace)
+		if err != nil {
+			return err
+		}
+	}
+	if err := prepareWorktree(cmd, opts); err != nil {
+		return err
+	}
+	// Enter the recorded workspace for a resumed worktree session. For an
+	// explicit --worktree, prepareWorktree already changed into the worktree;
+	// this additionally aligns the process directory with the recorded
+	// workspace before the project configuration is loaded, so the round runs
+	// with the config of the directory it actually executes in.
+	if now, err := os.Getwd(); err != nil {
+		return fmt.Errorf("get workspace: %w", err)
+	} else if target.TargetWorkspace != "" && target.TargetWorkspace != now {
+		if err := os.Chdir(target.TargetWorkspace); err != nil {
+			return fmt.Errorf("enter resume worktree: %w", err)
+		}
+	}
+	if err := prepareCLIConfig(cmd, opts); err != nil {
+		return err
+	}
+	return runExec(cmd.OutOrStdout(), cmd.ErrOrStderr(), cmd.InOrStdin(), opts, args, jsonOutput, timeoutSec, attachPaths, sessionID, mode)
+}
+
+func writeExecErrorJSON(out io.Writer, err error) error {
+	res := app.ExecResult{Status: "error", Error: err.Error()}
+	enc := json.NewEncoder(out)
+	enc.SetIndent("", "  ")
+	return enc.Encode(res)
+}
+
+func runExec(out io.Writer, errOut io.Writer, in io.Reader, opts *cliOptions, args []string, jsonOutput bool, timeoutSec int, attachPaths []string, sessionID, mode string) error {
 	prompt, err := readExecPrompt(in, args)
 	if err != nil {
 		return err
 	}
-	start := app.StartOptions{NewSession: true, Worktree: opts.worktreeSession}
+	start := app.StartOptions{NewSession: true, Worktree: opts.worktreeSession, ModeOverride: mode}
+	if sid := strings.TrimSpace(sessionID); sid != "" {
+		start = app.StartOptions{SessionID: sid, Worktree: opts.worktreeSession, ModeOverride: mode}
+		currentWorkspace, err := os.Getwd()
+		if err != nil {
+			return fmt.Errorf("get workspace: %w", err)
+		}
+		target, err := app.ValidateResumeTarget(opts.cfg, start, currentWorkspace)
+		if err != nil {
+			return err
+		}
+		if target.TargetWorkspace != "" && target.TargetWorkspace != currentWorkspace {
+			if err := os.Chdir(target.TargetWorkspace); err != nil {
+				return fmt.Errorf("enter resume worktree: %w", err)
+			}
+		}
+		if strings.TrimSpace(start.Worktree.Path) == "" && target.Session.Path != "" {
+			start.Worktree = target.Session
+		}
+		if err := app.CommitStartState(opts.cfg, start, currentWorkspace, target); err != nil {
+			return err
+		}
+	}
 
 	ctx := context.Background()
 	if timeoutSec > 0 {
