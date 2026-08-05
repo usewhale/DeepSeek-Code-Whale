@@ -68,6 +68,12 @@ ACP 代理（`whale-acp`）读取同一个 `~/.whale/mcp.json` 基线，并与 A
   ACP 会话没有 `/mcp` 命令，可查看代理 stderr 日志确认服务状态。
 - `session/new` 会等待服务连接完成（单服务超时，默认 15s），慢服务会延迟会话创建。
 
+**安全：** ACP 宿主完全可信——它控制 `cwd`、可提供 `mcpServers`（任意 stdio 进程），
+并驱动所有工具。whale-acp 默认权限为 **ask**（`permissions.default = "ask"`）：未显式允许的
+操作会通过 `session/request_permission` 请求用户批准。如需恢复宽松行为，在
+`config.toml` 中设置 `permissions.default = "allow"`；如需更严格，设置 `permissions.default = "deny"` 并
+配以显式 `permissions` 段。
+
 ## stdio examples
 
 Filesystem server:

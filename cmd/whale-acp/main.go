@@ -189,12 +189,16 @@ func loadPermissionPolicy(dataDir, workspaceRoot string) policy.RulePolicy {
 	}
 
 	perm := merged.Permissions
-	defaultPerm := policy.PermissionAllow
+	// ACP is unattended and trusts its host, so anything not explicitly
+	// allowed (by the default rules or the user's config) must ask instead of
+	// silently running. Hosts that want the old permissive behavior can set
+	// default = "allow" in config.toml.
+	defaultPerm := policy.PermissionAsk
 	switch strings.ToLower(perm.Default) {
 	case "deny":
 		defaultPerm = policy.PermissionDeny
-	case "ask":
-		defaultPerm = policy.PermissionAsk
+	case "allow":
+		defaultPerm = policy.PermissionAllow
 	}
 
 	// Build user rules per category so a single malformed value only drops the

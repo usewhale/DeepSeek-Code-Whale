@@ -75,6 +75,13 @@ merges it with the `mcpServers` an ACP client sends on `session/new` and
 - `session/new` waits while servers connect (per-server timeout, default
   15s), so a slow server delays session creation.
 
+**Security:** the ACP host is fully trusted — it controls `cwd`, may supply
+`mcpServers` (arbitrary stdio processes), and can drive any tool. whale-acp
+defaults permissions to **ask** (`permissions.default = "ask"`): operations not explicitly
+allowed prompt the user via `session/request_permission`. Restore the
+permissive behavior with `permissions.default = "allow"` in `config.toml`, or tighten
+further with `permissions.default = "deny"` plus explicit `permissions` sections.
+
 ## Examples
 
 ### stdio — Filesystem server
