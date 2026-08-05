@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/BurntSushi/toml"
 	"github.com/usewhale/whale/internal/acp"
@@ -401,6 +402,29 @@ func mergePermissions(dst, src *permFile) {
 	}
 }
 
+// mcpConsentRefusedMarker is the standardized stderr token that
+// whale-ecosystem MCP servers emit when spawned without explicit consent
+// (see the --allow-spawn spec). whale-acp matches it to enrich logs and to
+// treat the failure as a deterministic refusal.
+const mcpConsentRefusedMarker = "MCP-CONSENT-REFUSED"
+
+// failedMCPServers is a per-process negative cache of servers that failed to
+// start, keyed by identity. Without it, a session-heavy host would re-spawn a
+// broken server (e.g. a consent-refusing codemap) on every session/new.
+var failedMCPServers sync.Map // key: mcpServerKey -> struct{}
+
+func mcpServerKey(name, command string, args []string) string {
+	return name + "\x00" + command + "\x00" + strings.Join(args, "\x00")
+}
+
+// isConsentRefused reports whether a server failure carries the standardized
+// "refused to start without explicit consent" marker (see the --allow-spawn
+// spec), matched anywhere in the joined error/stderr text. It only affects log
+// classification; the failure is negative-cached either way.
+func isConsentRefused(err string) bool {
+	return strings.Contains(err, mcpConsentRefusedMarker)
+}
+
 // wireMCPServers loads the session MCP config, connects the configured
 // servers, and configures the toolset's deferred MCP catalog so the agent can
 // discover and promote mcp__<server>__<tool> tools via tool_search. MCP tools
@@ -415,6 +439,15 @@ func wireMCPServers(ts *tools.Toolset, dataDir, cwd string, mcps []acp.MCPServer
 		acp.Logger.Printf("mcp config: %v", err)
 		mcpCfg = whalemcp.Config{Servers: map[string]whalemcp.ServerConfig{}}
 	}
+	// Skip servers that failed to start in an earlier session of this process:
+	// don't re-spawn something known-broken on every session/new.
+	for _, name := range sortedKeys(mcpCfg.Servers) {
+		srv := mcpCfg.Servers[name]
+		if _, bad := failedMCPServers.Load(mcpServerKey(name, srv.Command, srv.Args)); bad {
+			delete(mcpCfg.Servers, name)
+			acp.Logger.Printf("mcp server %s: previously failed to start, skipping", sanitizeLogName(name))
+		}
+	}
 	var mcpManager *whalemcp.Manager
 	var reg *core.ToolRegistry
 	if len(mcpCfg.Servers) > 0 {
@@ -423,7 +456,14 @@ func wireMCPServers(ts *tools.Toolset, dataDir, cwd string, mcps []acp.MCPServer
 		for _, st := range mcpManager.States() {
 			switch st.Status {
 			case whalemcp.StatusFailed, whalemcp.StatusCancelled:
-				acp.Logger.Printf("mcp server %s: %s (%s)", sanitizeLogName(st.Name), st.Status, sanitizeLogName(st.Error))
+				if srv, ok := mcpCfg.Servers[st.Name]; ok {
+					failedMCPServers.Store(mcpServerKey(st.Name, srv.Command, srv.Args), struct{}{})
+				}
+				if isConsentRefused(st.Error) {
+					acp.Logger.Printf("mcp server %s: refused to start without explicit consent (%s)", sanitizeLogName(st.Name), sanitizeLogName(st.Error))
+				} else {
+					acp.Logger.Printf("mcp server %s: %s (%s)", sanitizeLogName(st.Name), st.Status, sanitizeLogName(st.Error))
+				}
 			default:
 				acp.Logger.Printf("mcp server %s: %s (%d tools)", sanitizeLogName(st.Name), st.Status, len(st.ToolNames))
 			}
