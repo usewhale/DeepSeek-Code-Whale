@@ -117,6 +117,28 @@ model = "gpt-4o"
 
 This override is used only for turns that include attachments, such as `whale exec --attach screen.png "describe this"` or TUI prompts submitted after pasting an image or local image path. Normal text-only turns keep using the regular DeepSeek configuration. When DeepSeek multimodal becomes publicly available, point `base_url`, `api_key_env`, and `model` back to the DeepSeek-compatible values.
 
+### Server-side web search (Responses API)
+
+DeepSeek's Responses API includes a server-executed web search: no third-party search key is needed, search runs on DeepSeek's servers and the results are fed directly to the model. Only the **`deepseek-v4-flash`** model currently supports it.
+
+```toml
+# Default (no config needed): deepseek-v4-flash uses the server-side search.
+[providers.deepseek]
+model = "deepseek-v4-flash"
+# web_search = "auto"   # auto (default) | local | server
+```
+
+- `auto` (**default**, the behavior when unset): uses `server` for `deepseek-v4-flash`, `local` for everything else.
+- `local`: current behavior. `web_search` is Whale's local tool (DuckDuckGo with Bing fallback), executed by the tool system.
+- `server`: forces the DeepSeek Responses API and translates the local `web_search` tool into the server-side built-in search. The model answers in the same response turn with search results already incorporated; no local tool dispatch happens. If the model is not `deepseek-v4-flash`, it degrades silently to `local` behavior.
+
+Notes:
+
+- Server-side search parameters are not controllable (`search_context_size`, `user_location` are ignored); search timing is decided server-side via `tool_choice: auto`.
+- Search context (`web_search_call` items) is kept in process memory; after a restart, resumed sessions re-run the search (still correct, just one extra search).
+- In `server` mode with thinking disabled, the request sends `reasoning.effort = "none"` explicitly (the Responses API enables thinking by default).
+- Turns with attachments still use the multimodal channel and are unaffected by `web_search = "server"`.
+
 ---
 
 ## Reference

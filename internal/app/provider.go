@@ -22,6 +22,7 @@ type providerOptions struct {
 	StreamIdleTimeout        time.Duration
 	DeepSeekPrefixCompletion bool
 	DeepSeekMultimodal       MultimodalProviderConfig
+	DeepSeekWebSearch        deepseek.WebSearchMode
 }
 
 func newDeepSeekProvider(opts providerOptions) (llm.Provider, error) {
@@ -73,6 +74,7 @@ func newDeepSeekProvider(opts providerOptions) (llm.Provider, error) {
 			Model:     mm.Model,
 		}))
 	}
+	dsOpts = append(dsOpts, deepseek.WithWebSearchMode(opts.DeepSeekWebSearch))
 	return deepseek.New(dsOpts...)
 }
 

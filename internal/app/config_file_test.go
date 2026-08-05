@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/usewhale/whale/internal/llm/deepseek"
 	"github.com/usewhale/whale/internal/plugins"
 	"github.com/usewhale/whale/internal/policy"
 	"github.com/usewhale/whale/internal/tools"
@@ -154,6 +155,40 @@ func TestApplyFileConfigSupportsDeepSeekMultimodalProvider(t *testing.T) {
 		cfg.DeepSeekMultimodal.APIKeyEnv != "OPENAI_API_KEY" ||
 		cfg.DeepSeekMultimodal.Model != "gpt-4o" {
 		t.Fatalf("deepseek multimodal config: %+v", cfg.DeepSeekMultimodal)
+	}
+}
+
+func TestApplyFileConfigSupportsDeepSeekWebSearchMode(t *testing.T) {
+	for _, tc := range []struct {
+		value string
+		want  deepseek.WebSearchMode
+	}{
+		{value: "local", want: deepseek.WebSearchModeLocal},
+		{value: "server", want: deepseek.WebSearchModeServer},
+		{value: "auto", want: deepseek.WebSearchModeAuto},
+		{value: "Server", want: deepseek.WebSearchModeServer},
+	} {
+		cfg := DefaultConfig()
+		if err := ApplyFileConfig(&cfg, FileConfig{
+			Providers: FileProvidersConfig{
+				DeepSeek: FileDeepSeekProviderConfig{WebSearch: tc.value},
+			},
+		}); err != nil {
+			t.Fatalf("ApplyFileConfig(%q): %v", tc.value, err)
+		}
+		if cfg.DeepSeekWebSearch != tc.want {
+			t.Fatalf("web_search(%q) = %q, want %q", tc.value, cfg.DeepSeekWebSearch, tc.want)
+		}
+	}
+	// Invalid values are rejected.
+	cfg := DefaultConfig()
+	err := ApplyFileConfig(&cfg, FileConfig{
+		Providers: FileProvidersConfig{
+			DeepSeek: FileDeepSeekProviderConfig{WebSearch: "bogus"},
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "web_search") {
+		t.Fatalf("error = %v, want invalid web_search error", err)
 	}
 }
 

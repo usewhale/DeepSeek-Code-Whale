@@ -15,6 +15,7 @@ import (
 
 	"github.com/usewhale/whale/internal/core"
 	"github.com/usewhale/whale/internal/llm"
+	"github.com/usewhale/whale/internal/llm/deepseek"
 )
 
 func TestNewDeepSeekProviderAppliesBaseURL(t *testing.T) {
@@ -165,6 +166,8 @@ func TestTaskProviderUsesConfiguredRetryPolicy(t *testing.T) {
 	defer srv.Close()
 
 	cfg := DefaultConfig()
+	// Pin to local search mode: this test mocks the chat-completions endpoint.
+	cfg.DeepSeekWebSearch = deepseek.WebSearchModeLocal
 	cfg.DataDir = t.TempDir()
 	cfg.APIBaseURL = srv.URL
 	cfg.AutoAcceptPermissions = true

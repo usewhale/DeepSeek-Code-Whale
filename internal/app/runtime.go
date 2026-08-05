@@ -91,6 +91,7 @@ func (a *App) ensureAgent() (*agent.Agent, error) {
 			StreamIdleTimeout:        a.cfg.RetryStreamIdleTimeout,
 			DeepSeekPrefixCompletion: a.cfg.DeepSeekPrefixCompletion,
 			DeepSeekMultimodal:       a.cfg.DeepSeekMultimodal,
+			DeepSeekWebSearch:        a.cfg.DeepSeekWebSearch,
 		})
 		if err != nil {
 			return nil, err

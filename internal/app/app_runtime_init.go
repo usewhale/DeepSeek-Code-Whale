@@ -56,6 +56,7 @@ func initAppRuntime(cfg Config, sessionInit appSessionInit, toolInit appToolInit
 			StreamIdleTimeout:        cfg.RetryStreamIdleTimeout,
 			DeepSeekPrefixCompletion: cfg.DeepSeekPrefixCompletion,
 			DeepSeekMultimodal:       cfg.DeepSeekMultimodal,
+			DeepSeekWebSearch:        cfg.DeepSeekWebSearch,
 		})
 	}
 	providerFactoryWithOptions := func(req tasks.ProviderRequest) (llm.Provider, error) {
@@ -76,6 +77,7 @@ func initAppRuntime(cfg Config, sessionInit appSessionInit, toolInit appToolInit
 			StreamIdleTimeout:        cfg.RetryStreamIdleTimeout,
 			DeepSeekPrefixCompletion: cfg.DeepSeekPrefixCompletion,
 			DeepSeekMultimodal:       cfg.DeepSeekMultimodal,
+			DeepSeekWebSearch:        cfg.DeepSeekWebSearch,
 		})
 	}
 	workspaceTools := func(workspace tasks.ToolWorkspace) (*core.ToolRegistry, error) {
