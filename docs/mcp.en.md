@@ -56,6 +56,25 @@ On Windows, the default path resolves under `%USERPROFILE%\\.whale`.
 
 ---
 
+## ACP (whale-acp)
+
+The ACP agent (`whale-acp`) reads the same `~/.whale/mcp.json` baseline and
+merges it with the `mcpServers` an ACP client sends on `session/new` and
+`session/load` (client wins on name conflicts).
+
+- Client-supplied servers must be stdio: whale-acp advertises
+  `mcpCapabilities {http: false, sse: false}` and rejects http/sse ones.
+- The local baseline is passed through unchanged, so an http server in
+  `~/.whale/mcp.json` still connects (same as the main app) even though the
+  client-facing advertisement is stdio-only.
+- MCP tools are lazy-loaded: the schema starts with only `tool_search`; the
+  model selects tools to activate them. Call `tool_search` with an empty
+  query to list available tools (it serves the `<available-deferred-tools>`
+  block). ACP sessions have no `/mcp` command — check the agent's stderr log
+  for server state instead.
+- `session/new` waits while servers connect (per-server timeout, default
+  15s), so a slow server delays session creation.
+
 ## Examples
 
 ### stdio — Filesystem server

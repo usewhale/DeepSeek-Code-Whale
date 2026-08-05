@@ -36,11 +36,17 @@ type Handler struct {
 type SessionRuntime struct {
 	Agent   *agent.Agent
 	Toolset *tools.Toolset
+
+	// Close releases per-session resources (e.g. connected MCP servers) when
+	// the session ends or the process shuts down. May be nil.
+	Close func()
 }
 
 // SessionRuntimeFactory builds a runtime scoped to a session's cwd. It is
-// invoked once per session (at session/new or session/load).
-type SessionRuntimeFactory func(acpSessionID, cwd string) (*SessionRuntime, error)
+// invoked once per session (at session/new or session/load). mcps are the MCP
+// servers the client wants the agent to connect to; ACP carries them on both
+// session/new and session/load.
+type SessionRuntimeFactory func(acpSessionID, cwd string, mcps []MCPServer) (*SessionRuntime, error)
 
 // sessionMeta is the persisted, cross-restart state for a session. Messages
 // live in the message store; this sidecar captures the context that ACP's
@@ -81,11 +87,30 @@ func NewHandler(transport *Transport, msgStore store.MessageStore, defaultCwd st
 func (h *Handler) SetRuntimeFactory(fn SessionRuntimeFactory) { h.newRuntime = fn }
 
 // buildRuntime creates a session-scoped runtime via the configured factory.
-func (h *Handler) buildRuntime(acpSessionID, cwd string) (*SessionRuntime, error) {
+func (h *Handler) buildRuntime(acpSessionID, cwd string, mcps []MCPServer) (*SessionRuntime, error) {
 	if h.newRuntime == nil {
 		return nil, fmt.Errorf("no session runtime factory configured")
 	}
-	return h.newRuntime(acpSessionID, cwd)
+	return h.newRuntime(acpSessionID, cwd, mcps)
+}
+
+// CloseSessions tears down every live session runtime, releasing per-session
+// resources such as connected MCP servers. Safe to call once at shutdown;
+// sessions without a Close hook are skipped.
+func (h *Handler) CloseSessions() {
+	h.mu.Lock()
+	sessions := make([]*SessionRuntime, 0, len(h.sessions))
+	for _, sctx := range h.sessions {
+		if sctx.runtime != nil {
+			sessions = append(sessions, sctx.runtime)
+		}
+	}
+	h.mu.Unlock()
+	for _, rt := range sessions {
+		if rt.Close != nil {
+			rt.Close()
+		}
+	}
 }
 
 // SetSessionsDir sets the directory used to persist per-session metadata
@@ -279,7 +304,7 @@ func (h *Handler) handleSessionNew(req *RPCRequest) *RPCErrorResponse {
 	if cwd == "" {
 		cwd = h.defaultCwd
 	}
-	rt, err := h.buildRuntime(whaleSessionID, cwd)
+	rt, err := h.buildRuntime(whaleSessionID, cwd, params.MCPServers)
 	if err != nil {
 		return NewErrorResponse(req.ID, ErrCodeInternal, fmt.Sprintf("failed to initialize session: %v", err))
 	}
@@ -337,7 +362,7 @@ func (h *Handler) handleSessionLoad(req *RPCRequest) *RPCErrorResponse {
 	_, exists := h.sessions[params.SessionID]
 	h.mu.Unlock()
 	if !exists {
-		rt, err := h.buildRuntime(params.SessionID, cwd)
+		rt, err := h.buildRuntime(params.SessionID, cwd, params.MCPServers)
 		if err != nil {
 			return NewErrorResponse(req.ID, ErrCodeInternal, fmt.Sprintf("failed to initialize session: %v", err))
 		}
