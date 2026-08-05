@@ -346,6 +346,25 @@ func TestModelFromEnv(t *testing.T) {
 			t.Fatalf("err = %v, want unsupported model error", err)
 		}
 	})
+	t.Run("mixed case canonicalized", func(t *testing.T) {
+		// IsSupportedModel matches case-insensitively, but the returned name
+		// feeds the provider, the window derivation (case-insensitive) AND the
+		// transport inference (case-sensitive prefix). A non-canonical name
+		// would make window (1M) and transport (chat completions) disagree and
+		// send a non-canonical slug to the API — so the canonical lowercase
+		// slug must be returned.
+		for _, in := range []string{"DeepSeek-V4-Flash", " DEEPSEEK-V4-PRO ", "DeepSeek-V4-FLASH"} {
+			t.Setenv("WHALE_MODEL", in)
+			m, err := modelFromEnv()
+			if err != nil {
+				t.Fatalf("modelFromEnv(%q): %v", in, err)
+			}
+			want := strings.ToLower(strings.TrimSpace(in))
+			if m != want {
+				t.Fatalf("modelFromEnv(%q) = %q, want canonical %q", in, m, want)
+			}
+		}
+	})
 }
 
 func TestAPIFromEnv(t *testing.T) {
@@ -442,7 +461,11 @@ func TestCompactThresholdFromEnv(t *testing.T) {
 			t.Fatalf("got %v, want 0.7", got)
 		}
 	})
-	for _, bad := range []string{"0", "1", "1.5", "-0.2", "abc"} {
+	// NaN must be rejected: it satisfies neither f <= 0 nor f >= 1, so a bare
+	// range check would accept it and WithAutoCompact's threshold guard would
+	// then silently keep the agent's 0.90 default — the trap this knob exists
+	// to avoid. Infinities must be rejected too.
+	for _, bad := range []string{"0", "1", "1.5", "-0.2", "abc", "NaN", "nan", "+Inf", "-Inf", "Inf"} {
 		t.Run("reject "+bad, func(t *testing.T) {
 			t.Setenv("WHALE_COMPACT_THRESHOLD", bad)
 			if _, err := compactThresholdFromEnv(); err == nil {

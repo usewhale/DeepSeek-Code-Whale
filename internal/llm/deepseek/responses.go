@@ -214,7 +214,7 @@ func (c *Client) streamResponses(ctx context.Context, history []core.Message, to
 		},
 	}
 	if len(tools) > 0 {
-		payload["tools"] = toResponsesTools(tools)
+		payload["tools"] = toResponsesTools(tools, c.webSearchMode == WebSearchModeLocal)
 		payload["tool_choice"] = "auto"
 	}
 	if c.maxTokens > 0 {
@@ -240,17 +240,38 @@ func (c *Client) responsesReasoningEffort() string {
 	return "high"
 }
 
-// toResponsesTools translates Whale's tool list to Responses API tools: the
-// local web_search function becomes the server-side built-in tool, everything
-// else stays a regular function tool. Note the Responses API uses the OpenAI
-// Responses function shape (name at the top level) rather than the chat
-// completions shape (name nested under function).
-func toResponsesTools(tools []core.Tool) []map[string]any {
+// toResponsesTools translates Whale's tool list to Responses API tools. The
+// Responses API uses the OpenAI Responses function shape (name at the top
+// level) rather than the chat completions shape (name nested under function).
+//
+// The web_search tool is mode-dependent: in server/auto mode it becomes the
+// server-side built-in tool; in local mode it stays a regular function tool so
+// Whale's tool system executes it (DuckDuckGo/Bing) and feeds the result back
+// — local search on the Responses transport, matching the chat-completions
+// path. Previously toResponsesTools always translated web_search to the
+// built-in, which silently turned "local" search into server-side search as
+// soon as the transport was explicitly set to responses.
+func toResponsesTools(tools []core.Tool, localWebSearch bool) []map[string]any {
 	out := make([]map[string]any, 0, len(tools)+1)
 	hasWebSearch := false
 	for _, t := range tools {
 		if strings.TrimSpace(t.Name()) == "web_search" {
-			hasWebSearch = true
+			if localWebSearch {
+				// Keep it as a regular function tool: the tool registry runs
+				// the local search and the result returns as
+				// function_call_output, exactly like the chat-completions path.
+				spec := core.DescribeTool(t)
+				if strings.TrimSpace(spec.Name) != "" {
+					out = append(out, map[string]any{
+						"type":        "function",
+						"name":        core.DisplayToolName(spec.Name),
+						"description": core.ApplyDisplayToolNames(spec.Description),
+						"parameters":  core.FlattenSchemaForModel(spec.Parameters),
+					})
+				}
+			} else {
+				hasWebSearch = true
+			}
 			continue
 		}
 		spec := core.DescribeTool(t)

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 
 	"github.com/usewhale/whale/internal/llm/deepseek"
@@ -55,4 +56,67 @@ func TestWebFetchExtractorHonorsAPI(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestWebFetchExtractorRetriesRateLimit: the extractor honors the same retry
+// policy as the main provider — a transient 429 is retried, not surfaced.
+func TestWebFetchExtractorRetriesRateLimit(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = fmt.Fprint(w, `{"error":"rate limited"}`)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n")
+		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	e := newDeepSeekWebFetchExtractor(webFetchExtractorOptions{
+		APIKey:      "test-key",
+		BaseURL:     srv.URL,
+		API:         deepseek.APIChatCompletions,
+		RetryPolicy: retryPolicyFromConfig(DefaultConfig()), // respects configured max_attempts
+	})
+	got, err := e.Extract(context.Background(), "q", "content")
+	if err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+	if got != "ok" {
+		t.Fatalf("extracted = %q, want ok", got)
+	}
+	if calls < 2 {
+		t.Fatalf("provider calls = %d, want retry after 429 (>=2)", calls)
+	}
+}
+
+// TestWebFetchExtractorConcurrent: each Extract builds its own provider, so
+// concurrent web_fetch summarizations share no state. Run under -race.
+func TestWebFetchExtractorConcurrent(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n")
+		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	e := newDeepSeekWebFetchExtractor(webFetchExtractorOptions{
+		APIKey:  "test-key",
+		BaseURL: srv.URL,
+		API:     deepseek.APIChatCompletions,
+	})
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := e.Extract(context.Background(), "q", "content"); err != nil {
+				t.Errorf("Extract: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
 }

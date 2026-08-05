@@ -159,6 +159,87 @@ func TestResponsesWebSearchServerMode(t *testing.T) {
 	}
 }
 
+// TestResponsesWebSearchLocalModeOnResponsesTransport locks the Phase 1b
+// compat rule "api = responses + web_search = local → Responses API with local
+// search": when the transport is explicitly the Responses API but search is
+// local, the web_search tool must stay a regular function tool (executed by
+// Whale's tool system) — NOT be translated to the server-side built-in, which
+// would silently turn "local" search into server-side search.
+func TestResponsesWebSearchLocalModeOnResponsesTransport(t *testing.T) {
+	var gotPayload map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotPayload); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"response.output_text.delta\",\"sequence_number\":3,\"delta\":\"local\"}\n\n")
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"response.completed\",\"sequence_number\":5,\"response\":{\"id\":\"resp_local\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"local\"}]}],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n")
+	}))
+	defer srv.Close()
+
+	_ = os.Setenv("DEEPSEEK_API_KEY", "test-key")
+	c, err := New(
+		WithBaseURL(srv.URL),
+		WithHTTPClient(srv.Client()),
+		WithModel("deepseek-v4-flash"),
+		WithThinking(false),
+		WithAPI(APIResponses),
+		WithWebSearchMode(WebSearchModeLocal),
+	)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	events := c.StreamResponse(context.Background(),
+		[]core.Message{{SessionID: "s1", Role: core.RoleUser, Text: "用本地搜索查一下"}},
+		[]core.Tool{fakeTool{"web_search"}, fakeTool{"shell_run"}},
+	)
+	for ev := range events {
+		if ev.Type == llm.EventError {
+			t.Fatalf("provider error: %v", ev.Err)
+		}
+	}
+
+	if gotPayload == nil {
+		t.Fatal("missing request payload")
+	}
+	tools, _ := gotPayload["tools"].([]any)
+	if len(tools) == 0 {
+		t.Fatal("expected tools in payload")
+	}
+	var sawBuiltinSearch bool
+	var sawLocalFunctionSearch bool
+	var sawShellRun bool
+	for _, raw := range tools {
+		tool, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		switch tool["type"] {
+		case "web_search":
+			sawBuiltinSearch = true
+		case "function":
+			// Display names: core.DisplayToolName maps web_search → WebSearch,
+			// shell_run → Bash.
+			switch tool["name"] {
+			case "WebSearch":
+				sawLocalFunctionSearch = true
+			case "Bash":
+				sawShellRun = true
+			}
+		}
+	}
+	if sawBuiltinSearch {
+		t.Fatal("web_search=local must NOT be translated to the server-side built-in on the Responses transport")
+	}
+	if !sawLocalFunctionSearch {
+		t.Fatalf("web_search=local must stay a regular function tool on the Responses transport, tools = %#v", gotPayload["tools"])
+	}
+	if !sawShellRun {
+		t.Fatalf("other function tools must still be declared, tools = %#v", gotPayload["tools"])
+	}
+}
+
 func TestResponsesMixedFunctionCallAndSearch(t *testing.T) {
 	var gotPayload map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -803,6 +884,7 @@ func TestResponsesEnabledAPIEnum(t *testing.T) {
 		// chat alias the ACP entrypoint used to hardcode.
 		{name: "responses+v4 flash", model: "deepseek-v4-flash", api: APIResponses, want: true},
 		{name: "responses+retired chat alias", model: "deepseek-chat", api: APIResponses, want: true},
+		{name: "responses+local search", model: "deepseek-v4-flash", api: APIResponses, webSearch: WebSearchModeLocal, want: true},
 		// Explicit APIChatCompletions wins for ANY model, including capable ones.
 		{name: "chat_completions+v4 flash", model: "deepseek-v4-flash", api: APIChatCompletions, want: false},
 		{name: "chat_completions+chat alias", model: "deepseek-chat", api: APIChatCompletions, want: false},
@@ -837,5 +919,35 @@ func TestWithAPIRejectsEmptySelection(t *testing.T) {
 	WithAPI(APIChatCompletions)(c)
 	if c.api != APIChatCompletions {
 		t.Fatalf("WithAPI(APIChatCompletions) did not set api, got %q", c.api)
+	}
+}
+
+func TestWithAPINormalizesWhitespaceAndCase(t *testing.T) {
+	// WithAPI must normalize like WithReasoningEffort: a raw " RESPONSES "
+	// (spaces, wrong case) must not silently miss responsesEnabled's exact
+	// match and fall back to the model heuristic.
+	c := newClientWithTransport(t, "deepseek-v4-flash", WithAPI(" RESPONSES "))
+	if c.api != APIResponses {
+		t.Fatalf("api = %q, want normalized %q", c.api, APIResponses)
+	}
+	if !c.responsesEnabled() {
+		t.Fatal("responsesEnabled() = false, want true (normalized APIResponses)")
+	}
+	WithAPI("  Chat_Completions  ")(c)
+	if c.api != APIChatCompletions {
+		t.Fatalf("api = %q, want %q", c.api, APIChatCompletions)
+	}
+}
+
+func TestWithAPIAutoFallsBackToHeuristic(t *testing.T) {
+	// WithAPI("auto") sets a non-canonical value that must behave exactly
+	// like unset: responsesEnabled falls through to the model heuristic.
+	c := newClientWithTransport(t, "deepseek-v4-flash", WithAPI("auto"))
+	if !c.responsesEnabled() {
+		t.Fatal("auto + v4-flash: expected Responses API (heuristic)")
+	}
+	c2 := newClientWithTransport(t, "deepseek-chat", WithAPI("auto"))
+	if c2.responsesEnabled() {
+		t.Fatal("auto + chat alias: expected chat completions (heuristic)")
 	}
 }

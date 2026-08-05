@@ -149,7 +149,7 @@ api = "auto"   # auto(默认) | responses | chat_completions
 ```
 
 - `auto`（**默认**，不配置即此行为）：传输通道由模型推断 —— `deepseek-v4-flash` 使用 Responses API，`web_search = "server"` 也推导为 Responses API；其他情况使用 chat completions。
-- `responses`：任何模型都使用 Responses API。
+- `responses`：任何模型都使用 Responses API。`web_search` 的含义不变：设为 `local` 时，搜索仍在 Whale 工具系统内、在 Responses 传输通道上执行；设为 `server`/`auto` 时使用 DeepSeek 内置搜索。
 - `chat_completions`：任何模型都使用 chat completions。如果同时设置了 `web_search = "server"`，冲突通过把 `web_search` 降级为 `local` 并给出警告解决 —— 绝不会拒绝启动。
 
 同样的选择也可以通过 `WHALE_API` 环境变量设置（`responses` | `chat_completions` | `auto`）；环境变量优先于配置文件。ACP 入口（`whale-acp`，Zed 运行的 agent）直接读取 `WHALE_API` —— 它不读取 `config.toml` 的 provider 设置。

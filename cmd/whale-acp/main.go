@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -92,8 +93,12 @@ func main() {
 	if err != nil {
 		acp.Logger.Fatalf("failed to create provider: %v", err)
 	}
+	apiLabel := string(api)
+	if apiLabel == "" {
+		apiLabel = "auto"
+	}
 	acp.Logger.Printf("provider: model=%s api=%q context_window=%d compact_threshold=%.2f max_tool_iters=%d",
-		modelName, api, contextWindow, compactThresh, maxToolIters)
+		modelName, apiLabel, contextWindow, compactThresh, maxToolIters)
 
 	sessionsDir := os.Getenv("WHALE_SESSIONS_DIR")
 	if sessionsDir == "" {
@@ -182,7 +187,14 @@ func main() {
 // the supported set, or defaults.DefaultModel. Mirrors the CLI's model
 // resolution and validation (internal/ui/cli/cmd/root.go).
 func modelFromEnv() (string, error) {
-	if v := strings.TrimSpace(os.Getenv("WHALE_MODEL")); v != "" {
+	// Canonicalize to the lowercase slug: IsSupportedModel matches
+	// case-insensitively, but the same name feeds both the provider (sent to
+	// the API as-is) and the window/transport inference (responsesCapableModel
+	// is a case-sensitive prefix). A mixed-case value that validated fine
+	// would otherwise make window (1M) and transport (chat completions)
+	// disagree and would send a non-canonical slug to the provider — the exact
+	// "one name, two meanings" failure this fix deletes.
+	if v := strings.ToLower(strings.TrimSpace(os.Getenv("WHALE_MODEL"))); v != "" {
 		if !defaults.IsSupportedModel(v) {
 			return "", fmt.Errorf("unsupported model: %s", v)
 		}
@@ -209,8 +221,13 @@ func compactThresholdFromEnv() (float64, error) {
 		return defaults.DefaultAutoCompactThreshold, nil
 	}
 	f, err := strconv.ParseFloat(v, 64)
-	if err != nil || f <= 0 || f >= 1 {
-		return 0, fmt.Errorf("invalid WHALE_COMPACT_THRESHOLD %q: must be a float in (0,1)", v)
+	// math.IsNaN is required: NaN satisfies neither f <= 0 nor f >= 1, so a
+	// bare range check would accept it, and WithAutoCompact's threshold guard
+	// (t > 0 && t < 1) would then silently keep the agent's 0.90 default —
+	// the exact trap this knob exists to avoid. +/-Inf are already rejected by
+	// the range check.
+	if err != nil || math.IsNaN(f) || f <= 0 || f >= 1 {
+		return 0, fmt.Errorf("invalid WHALE_COMPACT_THRESHOLD %q: must be a finite float in (0,1)", v)
 	}
 	return f, nil
 }

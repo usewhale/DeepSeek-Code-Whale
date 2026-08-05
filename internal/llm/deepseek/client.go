@@ -123,8 +123,12 @@ func WithWebSearchMode(mode WebSearchMode) Option {
 // any inference (see responsesEnabled).
 func WithAPI(api API) Option {
 	return func(c *Client) {
-		if strings.TrimSpace(string(api)) != "" {
-			c.api = api
+		// Normalize like WithReasoningEffort: a caller passing " RESPONSES "
+		// must not silently miss responsesEnabled's exact-match switch and
+		// fall back to the model heuristic.
+		v := strings.ToLower(strings.TrimSpace(string(api)))
+		if v != "" {
+			c.api = API(v)
 		}
 	}
 }

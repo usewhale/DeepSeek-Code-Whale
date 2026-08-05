@@ -90,9 +90,10 @@ func (a *App) rebuildTaskRuntimeLocked() error {
 			toolset.SetExtraSkills(a.pluginManager.Skills())
 		}
 		toolset.SetWebFetchExtractor(newDeepSeekWebFetchExtractor(webFetchExtractorOptions{
-			APIKey:  apiKey,
-			BaseURL: cfg.APIBaseURL,
-			API:     cfg.DeepSeekAPI,
+			APIKey:      apiKey,
+			BaseURL:     cfg.APIBaseURL,
+			API:         cfg.DeepSeekAPI,
+			RetryPolicy: retryPolicyFromConfig(cfg),
 		}))
 		return core.NewToolRegistryChecked(toolset.Tools())
 	}

@@ -149,7 +149,7 @@ api = "auto"   # auto (default) | responses | chat_completions
 ```
 
 - `auto` (**default**, the behavior when unset): the transport is inferred — `deepseek-v4-flash` uses the Responses API, and `web_search = "server"` also implies the Responses API; everything else uses chat completions.
-- `responses`: always speaks the Responses API, for any model.
+- `responses`: always speaks the Responses API, for any model. `web_search` keeps its meaning: with `web_search = "local"`, search still runs in Whale's tool system on the Responses transport; with `server`/`auto`, DeepSeek's built-in search is used.
 - `chat_completions`: always speaks chat completions, for any model. If `web_search = "server"` is also set, the conflict is resolved by degrading `web_search` to `local` with a warning — never by refusing to start.
 
 The same selection is available as the `WHALE_API` environment variable (`responses` | `chat_completions` | `auto`); the env var wins over the config value. The ACP entrypoint (`whale-acp`, the agent Zed runs) reads `WHALE_API` directly — it does not read `config.toml` provider settings.

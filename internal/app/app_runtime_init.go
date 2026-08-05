@@ -37,9 +37,10 @@ func initAppRuntime(cfg Config, sessionInit appSessionInit, toolInit appToolInit
 	})
 	toolInit.toolset.SetExecBoundaryApproval(parentSessionIDFunc, approvalFunc)
 	toolInit.toolset.SetWebFetchExtractor(newDeepSeekWebFetchExtractor(webFetchExtractorOptions{
-		APIKey:  apiKey,
-		BaseURL: cfg.APIBaseURL,
-		API:     cfg.DeepSeekAPI,
+		APIKey:      apiKey,
+		BaseURL:     cfg.APIBaseURL,
+		API:         cfg.DeepSeekAPI,
+		RetryPolicy: retryPolicyFromConfig(cfg),
 	}))
 	providerFactory := func(model string, maxTokens int) (llm.Provider, error) {
 		if strings.TrimSpace(model) == "" {
@@ -102,9 +103,10 @@ func initAppRuntime(cfg Config, sessionInit appSessionInit, toolInit appToolInit
 			toolset.SetExtraSkills(toolInit.pluginManager.Skills())
 		}
 		toolset.SetWebFetchExtractor(newDeepSeekWebFetchExtractor(webFetchExtractorOptions{
-			APIKey:  apiKey,
-			BaseURL: cfg.APIBaseURL,
-			API:     cfg.DeepSeekAPI,
+			APIKey:      apiKey,
+			BaseURL:     cfg.APIBaseURL,
+			API:         cfg.DeepSeekAPI,
+			RetryPolicy: retryPolicyFromConfig(cfg),
 		}))
 		return core.NewToolRegistryChecked(toolset.Tools())
 	}
