@@ -14,6 +14,7 @@ import (
 	"github.com/usewhale/whale/internal/agent"
 	"github.com/usewhale/whale/internal/core"
 	"github.com/usewhale/whale/internal/llm/deepseek"
+	whalemcp "github.com/usewhale/whale/internal/mcp"
 	"github.com/usewhale/whale/internal/policy"
 	"github.com/usewhale/whale/internal/store"
 	"github.com/usewhale/whale/internal/tools"
@@ -74,7 +75,7 @@ func main() {
 	// session gets its own runtime so prompts in different sessions run
 	// concurrently and a prompt waiting on a permission dialog only blocks its
 	// own session, not every other one sharing the process.
-	newRuntime := func(acpSessionID, cwd string) (*acp.SessionRuntime, error) {
+	newRuntime := func(acpSessionID, cwd string, mcps []acp.MCPServer) (*acp.SessionRuntime, error) {
 		ts, err := tools.NewToolset(cwd)
 		if err != nil {
 			return nil, fmt.Errorf("create toolset: %w", err)
@@ -90,17 +91,27 @@ func main() {
 		ts.SetExecBoundaryPolicy(sessionPolicy)
 		sid := acpSessionID
 		ts.SetExecBoundaryApproval(func() string { return sid }, approvalFn)
-		toolList := ts.Tools()
+		mcpManager, reg := wireMCPServers(ts, dataDir, cwd, mcps)
 		whaleAgent := agent.NewAgentWithRegistry(
 			provider,
 			msgStore,
-			core.NewToolRegistry(toolList),
+			reg,
 			agent.WithMaxToolIters(100),
 			agent.WithApprovalFunc(approvalFn),
 			agent.WithToolPolicy(sessionPolicy),
 		)
-		acp.Logger.Printf("session runtime ready: acp=%s cwd=%s tools=%d", acpSessionID, cwd, len(toolList))
-		return &acp.SessionRuntime{Agent: whaleAgent, Toolset: ts}, nil
+		acp.Logger.Printf("session runtime ready: acp=%s cwd=%s tools=%d", acpSessionID, cwd, len(reg.Tools()))
+		return &acp.SessionRuntime{
+			Agent:   whaleAgent,
+			Toolset: ts,
+			Close: func() {
+				if mcpManager != nil {
+					if err := mcpManager.Close(); err != nil {
+						acp.Logger.Printf("mcp close: %v", err)
+					}
+				}
+			},
+		}, nil
 	}
 
 	handler := acp.NewHandler(transport, msgStore, workspaceRoot)
@@ -109,7 +120,10 @@ func main() {
 
 	acp.Logger.Printf("ready, waiting for ACP messages on stdin")
 
-	if err := handler.Run(); err != nil {
+	err = handler.Run()
+	// Close MCP server sessions before exiting — os.Exit below skips defers.
+	handler.CloseSessions()
+	if err != nil {
 		if err == context.Canceled || err.Error() == "EOF" || err.Error() == "stdin read: EOF" {
 			acp.Logger.Printf("shutting down normally")
 			os.Exit(0)
@@ -175,12 +189,16 @@ func loadPermissionPolicy(dataDir, workspaceRoot string) policy.RulePolicy {
 	}
 
 	perm := merged.Permissions
-	defaultPerm := policy.PermissionAllow
+	// ACP is unattended and trusts its host, so anything not explicitly
+	// allowed (by the default rules or the user's config) must ask instead of
+	// silently running. Hosts that want the old permissive behavior can set
+	// default = "allow" in config.toml.
+	defaultPerm := policy.PermissionAsk
 	switch strings.ToLower(perm.Default) {
 	case "deny":
 		defaultPerm = policy.PermissionDeny
-	case "ask":
-		defaultPerm = policy.PermissionAsk
+	case "allow":
+		defaultPerm = policy.PermissionAllow
 	}
 
 	// Build user rules per category so a single malformed value only drops the
@@ -251,3 +269,139 @@ func mergePermissions(dst, src *permFile) {
 		}
 	}
 }
+
+// wireMCPServers loads the session MCP config, connects the configured
+// servers, and configures the toolset's deferred MCP catalog so the agent can
+// discover and promote mcp__<server>__<tool> tools via tool_search. MCP tools
+// are deliberately NOT registered eagerly: the session schema carries only
+// tool_search (plus the <available-deferred-tools> block) until the model
+// selects specific tools — matching the main app and bench/deferred_compare.
+// Returns the manager (for shutdown) and the session tool registry (promoted
+// tools are added to it lazily). The registry is never nil.
+func wireMCPServers(ts *tools.Toolset, dataDir, cwd string, mcps []acp.MCPServer) (*whalemcp.Manager, *core.ToolRegistry) {
+	mcpCfg, err := mcpConfigForSession(dataDir, mcps)
+	if err != nil {
+		acp.Logger.Printf("mcp config: %v", err)
+		mcpCfg = whalemcp.Config{Servers: map[string]whalemcp.ServerConfig{}}
+	}
+	var mcpManager *whalemcp.Manager
+	var reg *core.ToolRegistry
+	if len(mcpCfg.Servers) > 0 {
+		mcpManager = whalemcp.NewManager(mcpCfg, cwd)
+		mcpManager.Initialize(context.Background())
+		for _, st := range mcpManager.States() {
+			switch st.Status {
+			case whalemcp.StatusFailed, whalemcp.StatusCancelled:
+				acp.Logger.Printf("mcp server %s: %s (%s)", st.Name, st.Status, st.Error)
+			default:
+				acp.Logger.Printf("mcp server %s: %s (%d tools)", st.Name, st.Status, len(st.ToolNames))
+			}
+		}
+		if catalog := mcpManager.BuildDeferredCatalog(); catalog != nil && !catalog.Empty() {
+			ts.SetDeferredToolSearch(
+				&deferredCatalogAdapter{c: catalog},
+				func(names []string) ([]core.ToolSpec, error) {
+					built, err := mcpManager.BuildTools(names)
+					if err != nil {
+						return nil, err
+					}
+					if err := reg.AddTools(built); err != nil {
+						return nil, err
+					}
+					specs := make([]core.ToolSpec, len(built))
+					for i, t := range built {
+						specs[i] = core.DescribeTool(t)
+					}
+					return specs, nil
+				},
+				func() string { return whalemcp.RenderAvailableDeferredTools(catalog) },
+			)
+		}
+	}
+	// The registry must be built after SetDeferredToolSearch so tool_search is
+	// included in the schema when the deferred catalog is non-empty.
+	reg = core.NewToolRegistry(ts.Tools())
+	return mcpManager, reg
+}
+
+// mcpConfigForSession returns the MCP server config for a session: the local
+// ~/.whale/mcp.json baseline (or $WHALE_HOME/mcp.json) merged with the
+// servers the ACP client supplied on session/new / session/load.
+// Client-supplied servers win on name conflicts — the client is authoritative
+// for its own session.
+func mcpConfigForSession(dataDir string, mcps []acp.MCPServer) (whalemcp.Config, error) {
+	cfg, err := whalemcp.LoadConfig(whalemcp.DefaultConfigPath(dataDir))
+	if err != nil {
+		return cfg, err
+	}
+	for _, m := range mcps {
+		name := strings.TrimSpace(m.Name)
+		if name == "" {
+			continue
+		}
+		if kind := clientMCPServerTransport(m); kind != "stdio" {
+			// We advertise mcpCapabilities {http:false, sse:false} — stdio only.
+			acp.Logger.Printf("mcp server %s: unsupported transport %q (stdio only), skipping", name, kind)
+			continue
+		}
+		cfg.Servers[name] = whalemcp.ServerConfig{
+			Name:    name,
+			Type:    strings.TrimSpace(m.Type),
+			Command: m.Command,
+			Args:    m.Args,
+			Env:     envVariableMap(m.Env),
+			URL:     m.URL,
+		}
+	}
+	return cfg, nil
+}
+
+// envVariableMap converts ACP's env array ({name,value} objects) into the map
+// form the whale MCP manager expects.
+func envVariableMap(envs []acp.EnvVariable) map[string]string {
+	if len(envs) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(envs))
+	for _, e := range envs {
+		if strings.TrimSpace(e.Name) != "" {
+			out[e.Name] = e.Value
+		}
+	}
+	return out
+}
+
+// clientMCPServerTransport returns the transport kind of a client-supplied
+// MCP server. whale-acp advertises mcpCapabilities {http:false, sse:false},
+// so only stdio servers (command + args + env) are accepted.
+func clientMCPServerTransport(m acp.MCPServer) string {
+	switch strings.ToLower(strings.TrimSpace(m.Type)) {
+	case "http", "streamable-http", "streamable_http", "streamablehttp":
+		return "http"
+	case "sse":
+		return "sse"
+	}
+	if strings.TrimSpace(m.URL) != "" {
+		return "http"
+	}
+	return "stdio"
+}
+
+// deferredCatalogAdapter adapts mcp.DeferredToolCatalog to the tools package's
+// DeferredToolCatalog interface consumed by tool_search.
+type deferredCatalogAdapter struct {
+	c *whalemcp.DeferredToolCatalog
+}
+
+func (a *deferredCatalogAdapter) Empty() bool { return a.c.Empty() }
+
+func (a *deferredCatalogAdapter) Search(query string) []tools.DeferredToolEntry {
+	results := a.c.Search(query)
+	out := make([]tools.DeferredToolEntry, len(results))
+	for i, r := range results {
+		out[i] = tools.DeferredToolEntry{Name: r.Name, Server: r.Server, Description: r.Description}
+	}
+	return out
+}
+
+func (a *deferredCatalogAdapter) Names() []string { return a.c.Names() }

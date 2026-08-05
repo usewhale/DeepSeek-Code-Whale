@@ -673,6 +673,11 @@ func newGitRepo(t *testing.T) string {
 	run(t, dir, "git", "init", "-b", "main")
 	run(t, dir, "git", "config", "user.email", "test@example.com")
 	run(t, dir, "git", "config", "user.name", "Test User")
+	// Keep test repos hermetic: disable commit/tag signing so these tests do
+	// not depend on the developer's gpg setup (commit.gpgsign / tag.gpgsign),
+	// which otherwise blocks headless runs waiting for a passphrase.
+	run(t, dir, "git", "config", "commit.gpgsign", "false")
+	run(t, dir, "git", "config", "tag.gpgsign", "false")
 	write(t, filepath.Join(dir, "README.md"), []byte("test\n"))
 	run(t, dir, "git", "add", "README.md")
 	run(t, dir, "git", "commit", "-m", "initial")
