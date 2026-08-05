@@ -117,6 +117,7 @@ const (
 	MethodAuthenticate        = "authenticate"
 	MethodSessionNew          = "session/new"
 	MethodSessionLoad         = "session/load"
+	MethodSessionList         = "session/list"
 	MethodSessionSetMode      = "session/set_mode"
 	MethodSessionSetConfigOpt = "session/set_config_option"
 	MethodSessionPrompt       = "session/prompt"
@@ -197,9 +198,26 @@ type MCPCapabilities struct {
 
 // SessionCapabilities describes session-related agent capabilities.
 type SessionCapabilities struct {
+	// List advertises support for the session/list method. Supplying an empty
+	// object means the agent supports listing sessions (see ACP session
+	// management); clients such as Zed gate their session-history UI on it.
+	List *SessionListCapabilities `json:"list,omitempty"`
+	// Delete advertises support for the session/delete method. Not implemented
+	// by whale-acp, so it is intentionally never advertised.
+	Delete *SessionDeleteCapabilities `json:"delete,omitempty"`
+	// AdditionalDirectories advertises support for additionalDirectories on
+	// session lifecycle requests. Not implemented.
 	AdditionalDirectories *struct{}      `json:"additionalDirectories,omitempty"`
 	Meta                  map[string]any `json:"_meta,omitempty"`
 }
+
+// SessionListCapabilities is the (currently empty) capability object that
+// advertises session/list support.
+type SessionListCapabilities struct{}
+
+// SessionDeleteCapabilities is the (currently empty) capability object that
+// advertises session/delete support.
+type SessionDeleteCapabilities struct{}
 
 // AgentAuthCapabilities describes authentication capabilities.
 type AgentAuthCapabilities struct {
@@ -326,6 +344,35 @@ type LoadSessionResponse struct {
 	Messages []ContentBlock    `json:"messages,omitempty"`
 	Modes    *SessionModeState `json:"modes,omitempty"`
 	Meta     map[string]any    `json:"_meta,omitempty"`
+}
+
+// ---------------------------------------------------------------------------
+// Session / list
+// ---------------------------------------------------------------------------
+
+// ListSessionsRequest lists the agent's persisted sessions so the client can
+// offer a session-history picker (e.g. Zed's agent panel). cwd filters to
+// sessions whose working directory equals the given absolute path; cursor
+// requests the next page when a previous response returned nextCursor.
+type ListSessionsRequest struct {
+	Cwd    string `json:"cwd,omitempty"`
+	Cursor string `json:"cursor,omitempty"`
+}
+
+// ListSessionsResponse returns the (filtered) session list. nextCursor is
+// omitted when there are no more pages.
+type ListSessionsResponse struct {
+	Sessions   []SessionInfo `json:"sessions"`
+	NextCursor string        `json:"nextCursor,omitempty"`
+}
+
+// SessionInfo describes one persisted session for session/list.
+type SessionInfo struct {
+	SessionID             string   `json:"sessionId"`
+	Cwd                   string   `json:"cwd"`
+	AdditionalDirectories []string `json:"additionalDirectories,omitempty"`
+	Title                 string   `json:"title,omitempty"`
+	UpdatedAt             string   `json:"updatedAt,omitempty"`
 }
 
 // ---------------------------------------------------------------------------

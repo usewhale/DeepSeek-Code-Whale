@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -291,6 +292,8 @@ func (h *Handler) handleRequest(req *RPCRequest) {
 		errResp = h.handleSessionNew(req)
 	case MethodSessionLoad:
 		errResp = h.handleSessionLoad(req)
+	case MethodSessionList:
+		errResp = h.handleSessionList(req)
 	case MethodSessionSetMode:
 		errResp = h.handleSetMode(req)
 	case MethodSessionCancel:
@@ -330,6 +333,9 @@ func (h *Handler) handleInitialize(req *RPCRequest) *RPCErrorResponse {
 				Image: false, Audio: false, EmbeddedContext: true,
 			},
 			MCPCapabilities: &MCPCapabilities{HTTP: false, SSE: false},
+			SessionCapabilities: &SessionCapabilities{
+				List: &SessionListCapabilities{},
+			},
 		},
 		AgentInfo: &Implementation{Name: "whale", Title: "Whale", Version: "0.1.0"},
 	}))
@@ -460,6 +466,78 @@ func (h *Handler) handleSessionLoad(req *RPCRequest) *RPCErrorResponse {
 	h.transport.SendResponse(NewSuccessResponse(req.ID, LoadSessionResponse{
 		Modes: sessionModeState(currentMode),
 	}))
+	return nil
+}
+
+// handleSessionList implements the ACP session/list method: the persisted
+// session history that clients such as Zed's agent panel expose as "previous
+// sessions". Sessions are read from the same directory as the message store
+// (h.metaDir) so every listed id resolves through session/load. The list is
+// not paginated — whale-acp keeps at most a few dozen sessions per host — so
+// a single response is returned with no nextCursor.
+func (h *Handler) handleSessionList(req *RPCRequest) *RPCErrorResponse {
+	var params ListSessionsRequest
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		return NewErrorResponse(req.ID, ErrCodeInvalidParams, fmt.Sprintf("invalid params: %v", err))
+	}
+	sessionsDir := h.metaDir
+	if sessionsDir == "" {
+		return NewErrorResponse(req.ID, ErrCodeInternal, "session store not configured")
+	}
+	filterCwd := strings.TrimSpace(params.Cwd)
+
+	entries, err := os.ReadDir(sessionsDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			h.transport.SendResponse(NewSuccessResponse(req.ID, ListSessionsResponse{Sessions: []SessionInfo{}}))
+			return nil
+		}
+		return NewErrorResponse(req.ID, ErrCodeInternal, fmt.Sprintf("failed to list sessions: %v", err))
+	}
+	type candidate struct {
+		id      string
+		cwd     string
+		modTime time.Time
+	}
+	var cands []candidate
+	for _, e := range entries {
+		if e.IsDir() || !core.IsSessionJSONLName(e.Name()) {
+			continue
+		}
+		id := strings.TrimSuffix(e.Name(), ".jsonl")
+		if id == "" || strings.Contains(id, "--subagent-") || strings.HasPrefix(id, "subagent-") {
+			continue
+		}
+		meta, _ := h.loadSessionMeta(id)
+		cwd := meta.Cwd
+		if cwd == "" {
+			cwd = h.defaultCwd
+		}
+		if filterCwd != "" && cwd != filterCwd {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		cands = append(cands, candidate{id: id, cwd: cwd, modTime: info.ModTime()})
+	}
+	sort.Slice(cands, func(i, j int) bool { return cands[i].modTime.After(cands[j].modTime) })
+
+	out := make([]SessionInfo, 0, len(cands))
+	for _, c := range cands {
+		title, err := session.FirstVisibleUserMessage(sessionsDir, c.id)
+		if err != nil || strings.TrimSpace(title) == "" {
+			title = "(no message yet)"
+		}
+		out = append(out, SessionInfo{
+			SessionID: c.id,
+			Cwd:       c.cwd,
+			Title:     title,
+			UpdatedAt: c.modTime.UTC().Format(time.RFC3339),
+		})
+	}
+	h.transport.SendResponse(NewSuccessResponse(req.ID, ListSessionsResponse{Sessions: out}))
 	return nil
 }
 

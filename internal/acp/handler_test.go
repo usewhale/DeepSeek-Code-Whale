@@ -3,6 +3,8 @@ package acp
 import (
 	"bytes"
 	"encoding/json"
+	"os"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -260,5 +262,155 @@ func TestEvictionAllBusyKeepsCapExceeded(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("expected the idle newcomer to be evicted (Close not invoked)")
+	}
+}
+
+func TestInitializeAdvertisesSessionList(t *testing.T) {
+	var buf bytes.Buffer
+	// Wire a handler with a captured transport so we can inspect the response.
+	msgStore, err := store.NewJSONLStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	h2 := NewHandler(NewTransportWithIO(&buf, &buf, &buf), msgStore, "/work")
+	h2.SetRuntimeFactory(func(acpSessionID, cwd string, mcps []MCPServer) (*SessionRuntime, error) {
+		return &SessionRuntime{}, nil
+	})
+	h2.handleRequest(&RPCRequest{
+		JSONRPC: "2.0",
+		ID:      &RequestID{Value: 1},
+		Method:  MethodInitialize,
+		Params:  json.RawMessage(`{"protocolVersion": 1}`),
+	})
+	var resp struct {
+		Result struct {
+			AgentCapabilities struct {
+				SessionCapabilities *SessionCapabilities `json:"sessionCapabilities"`
+			} `json:"agentCapabilities"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &resp); err != nil {
+		t.Fatalf("parse initialize response: %v", err)
+	}
+	sc := resp.Result.AgentCapabilities.SessionCapabilities
+	if sc == nil || sc.List == nil {
+		t.Fatalf("expected sessionCapabilities.list to be advertised, got %+v", sc)
+	}
+	if sc.Delete != nil {
+		t.Fatalf("session/delete is not implemented and must not be advertised, got %+v", sc.Delete)
+	}
+}
+
+func writeSessionFile(t *testing.T, dir, id, cwd, firstUserMsg string, modTime time.Time) {
+	t.Helper()
+	path := dir + "/" + id + ".jsonl"
+	if err := os.WriteFile(path, []byte(`{"ID":"m-1","SessionID":"`+id+`","Role":"user","Text":`+strconv.Quote(firstUserMsg)+`,"Hidden":false}`+"\n"), 0o600); err != nil {
+		t.Fatalf("write session %s: %v", id, err)
+	}
+	if cwd != "" {
+		b, _ := json.Marshal(sessionMeta{Cwd: cwd, Mode: "agent"})
+		if err := os.WriteFile(dir+"/"+id+".meta.json", b, 0o600); err != nil {
+			t.Fatalf("write meta %s: %v", id, err)
+		}
+	}
+	if err := os.Chtimes(path, modTime, modTime); err != nil {
+		t.Fatalf("set mtime %s: %v", id, err)
+	}
+}
+
+func TestSessionListReturnsPersistedSessions(t *testing.T) {
+	dir := t.TempDir()
+	base := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
+	// Two sessions in /work, one in /elsewhere, one subagent id, one approval sidecar.
+	writeSessionFile(t, dir, "sess-1", "/work", "first work session", base)
+	writeSessionFile(t, dir, "sess-2", "/work", "second work session", base.Add(2*time.Hour))
+	writeSessionFile(t, dir, "sess-3", "/elsewhere", "other project", base.Add(1*time.Hour))
+	writeSessionFile(t, dir, "subagent-x", "/work", "child", base)
+	// Sidecar files must be ignored by the listing.
+	if err := os.WriteFile(dir+"/sess-1.approvals.json", []byte(`{"approvals":[]}`), 0o600); err != nil {
+		t.Fatalf("write sidecar: %v", err)
+	}
+
+	msgStore, err := store.NewJSONLStore(dir)
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	var buf bytes.Buffer
+	h := NewHandler(NewTransportWithIO(&buf, &buf, &buf), msgStore, "/work")
+	h.SetSessionsDir(dir)
+	h.SetRuntimeFactory(func(acpSessionID, cwd string, mcps []MCPServer) (*SessionRuntime, error) {
+		return &SessionRuntime{}, nil
+	})
+
+	// Filter by cwd=/work: only sess-1 and sess-2, sorted by mtime desc.
+	h.handleRequest(&RPCRequest{
+		JSONRPC: "2.0",
+		ID:      &RequestID{Value: 2},
+		Method:  MethodSessionList,
+		Params:  json.RawMessage(`{"cwd": "/work"}`),
+	})
+	var resp struct {
+		Result ListSessionsResponse `json:"result"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &resp); err != nil {
+		t.Fatalf("parse session/list response: %v", err)
+	}
+	got := resp.Result.Sessions
+	if len(got) != 2 {
+		t.Fatalf("expected 2 sessions for cwd=/work, got %d: %+v", len(got), got)
+	}
+	if got[0].SessionID != "sess-2" || got[1].SessionID != "sess-1" {
+		t.Fatalf("expected mtime-desc order sess-2, sess-1, got %s, %s", got[0].SessionID, got[1].SessionID)
+	}
+	if got[0].Cwd != "/work" || got[0].Title != "second work session" {
+		t.Fatalf("unexpected session info: %+v", got[0])
+	}
+	if got[0].UpdatedAt == "" {
+		t.Fatal("expected RFC3339 updatedAt")
+	}
+
+	// No cwd filter: all non-subagent sessions, again mtime desc.
+	buf.Reset()
+	h.handleRequest(&RPCRequest{
+		JSONRPC: "2.0",
+		ID:      &RequestID{Value: 3},
+		Method:  MethodSessionList,
+		Params:  json.RawMessage(`{}`),
+	})
+	if err := json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &resp); err != nil {
+		t.Fatalf("parse unfiltered session/list response: %v", err)
+	}
+	got = resp.Result.Sessions
+	if len(got) != 3 {
+		t.Fatalf("expected 3 sessions unfiltered, got %d: %+v", len(got), got)
+	}
+	if got[0].SessionID != "sess-2" || got[2].SessionID != "sess-1" {
+		t.Fatalf("unexpected unfiltered order: %s, %s, %s", got[0].SessionID, got[1].SessionID, got[2].SessionID)
+	}
+}
+
+func TestSessionListMissingDirReturnsEmpty(t *testing.T) {
+	dir := t.TempDir() + "/does-not-exist"
+	msgStore, err := store.NewJSONLStore(dir)
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	var buf bytes.Buffer
+	h := NewHandler(NewTransportWithIO(&buf, &buf, &buf), msgStore, "/work")
+	h.SetSessionsDir(dir)
+	h.handleRequest(&RPCRequest{
+		JSONRPC: "2.0",
+		ID:      &RequestID{Value: 1},
+		Method:  MethodSessionList,
+		Params:  json.RawMessage(`{}`),
+	})
+	var resp struct {
+		Result ListSessionsResponse `json:"result"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &resp); err != nil {
+		t.Fatalf("parse response: %v", err)
+	}
+	if len(resp.Result.Sessions) != 0 {
+		t.Fatalf("expected empty list, got %+v", resp.Result.Sessions)
 	}
 }
