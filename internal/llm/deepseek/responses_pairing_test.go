@@ -6,15 +6,21 @@ import (
 	"github.com/usewhale/whale/internal/core"
 )
 
-func TestResponsesFunctionCallOutputAdjacentWithReasoning(t *testing.T) {
+func TestResponsesParallelFunctionCallsStayInReasoningAssistantGroup(t *testing.T) {
 	history := []core.Message{
 		{SessionID: "s", Role: core.RoleUser, Text: "2026 年最新发布的稳定版 Go 是哪个版本？"},
 		{SessionID: "s", Role: core.RoleAssistant,
 			Reasoning: "The user is asking about the latest stable version of Go released in 2026.",
-			ToolCalls: []core.ToolCall{{ID: "call_01_bw1UuoLuyxMgK3sz0Nm26550", Name: "fetch", Input: `{"url": "https://go.dev/doc/devel/release"}`}},
+			ToolCalls: []core.ToolCall{
+				{ID: "call_01_bw1UuoLuyxMgK3sz0Nm26550", Name: "fetch", Input: `{"url": "https://go.dev/doc/devel/release"}`},
+				{ID: "call_02_R9buKvzqdf3ViQwt0xOa", Name: "fetch", Input: `{"url": "https://go.dev/VERSION?m=text"}`},
+			},
 		},
 		{SessionID: "s", Role: core.RoleTool,
-			ToolResults: []core.ToolResult{{ToolCallID: "call_01_bw1UuoLuyxMgK3sz0Nm26550", Name: "fetch", ModelText: "go1.26.5 released"}},
+			ToolResults: []core.ToolResult{
+				{ToolCallID: "call_01_bw1UuoLuyxMgK3sz0Nm26550", Name: "fetch", ModelText: "go1.26.5 released"},
+				{ToolCallID: "call_02_R9buKvzqdf3ViQwt0xOa", Name: "fetch", ModelText: "go1.26.5"},
+			},
 		},
 	}
 	items := toResponsesInputItems(history, nil)
@@ -23,29 +29,20 @@ func TestResponsesFunctionCallOutputAdjacentWithReasoning(t *testing.T) {
 		typ, _ := it["type"].(string)
 		types = append(types, typ)
 	}
-	// function_call must be immediately followed by its function_call_output;
-	// the reasoning item must NOT sit between them.
-	for i := 0; i < len(types); i++ {
-		if types[i] == "function_call" {
-			if i+1 >= len(types) || types[i+1] != "function_call_output" {
-				t.Fatalf("function_call at %d not adjacent to output: %v", i, types)
-			}
-		}
+	want := []string{
+		"message",
+		"reasoning",
+		"function_call",
+		"function_call",
+		"function_call_output",
+		"function_call_output",
 	}
-	// The reasoning item must come before the function_call pair.
-	lastReasoning := -1
-	firstCall := -1
-	for i, typ := range types {
-		switch typ {
-		case "reasoning":
-			lastReasoning = i
-		case "function_call":
-			if firstCall < 0 {
-				firstCall = i
-			}
-		}
+	if len(types) != len(want) {
+		t.Fatalf("types = %v, want %v", types, want)
 	}
-	if lastReasoning > firstCall {
-		t.Fatalf("reasoning (%d) after function_call (%d): %v", lastReasoning, firstCall, types)
+	for i := range want {
+		if types[i] != want[i] {
+			t.Fatalf("types = %v, want %v", types, want)
+		}
 	}
 }
