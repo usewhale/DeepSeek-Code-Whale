@@ -40,6 +40,69 @@ const (
 	responsesCapableModelPrefix = "deepseek-v4-flash"
 )
 
+// API selects which DeepSeek endpoint the client speaks: the Responses API
+// (POST /responses) or the chat completions API (POST /chat/completions).
+// The API is a transport property, decoupled from the model: the model still
+// picks the payload shape, but the API picks where it is sent.
+type API string
+
+const (
+	// APIAuto (the zero value) infers the transport from the model name (and
+	// web_search mode): deepseek-v4-flash uses the Responses API, any other
+	// model uses chat completions.
+	APIAuto API = ""
+	// APIResponses forces the Responses API (POST /responses) for any model.
+	APIResponses API = "responses"
+	// APIChatCompletions forces the chat completions API
+	// (POST /chat/completions) for any model.
+	APIChatCompletions API = "chat_completions"
+)
+
+// NormalizeAPI parses and validates an API selection string. Exactly three
+// values are accepted — "responses", "chat_completions", "auto" — plus the
+// empty string, which normalizes to APIAuto. Anything else is an error: there
+// is no bare /completions endpoint (only /responses and /chat/completions),
+// so aliases like "completions" or "chat" would name nothing and re-introduce
+// the silent model-name fallback this selection deletes. One canonical
+// spelling per value, no synonyms.
+func NormalizeAPI(v string) (API, error) {
+	switch API(strings.ToLower(strings.TrimSpace(v))) {
+	case "", "auto":
+		return APIAuto, nil
+	case APIResponses:
+		return APIResponses, nil
+	case APIChatCompletions:
+		return APIChatCompletions, nil
+	default:
+		return APIAuto, fmt.Errorf("invalid api %q: must be \"responses\", \"chat_completions\", or \"auto\"", v)
+	}
+}
+
+// ResolveTransport reconciles an explicit API selection with the web_search
+// mode. The api knob is the transport authority: web_search = "server" is at
+// best an inference that the Responses API is in use, so it can imply the
+// Responses API but never overrides an explicit chat_completions choice. The
+// one conflict — explicit chat completions plus server-side search — degrades
+// web_search to local with a warning rather than refusing to start (matching
+// the codebase's existing soft-degrade precedent). The returned warning is
+// empty when no adjustment was needed.
+func ResolveTransport(api API, webSearch WebSearchMode) (API, WebSearchMode, string) {
+	switch api {
+	case APIChatCompletions:
+		if webSearch == WebSearchModeServer {
+			return api, WebSearchModeLocal, "web_search=\"server\" requires the Responses API; degrading to web_search=\"local\" because the API is \"chat_completions\""
+		}
+		return api, webSearch, ""
+	case APIAuto:
+		if webSearch == WebSearchModeServer {
+			return APIResponses, webSearch, ""
+		}
+		return api, webSearch, ""
+	default:
+		return api, webSearch, ""
+	}
+}
+
 // NormalizeWebSearchMode parses and validates a web search mode string. An
 // empty value normalizes to WebSearchModeAuto: deepseek-v4-flash uses
 // DeepSeek's server-side search out of the box, other models keep the local
@@ -58,10 +121,18 @@ func NormalizeWebSearchMode(v string) (WebSearchMode, error) {
 }
 
 // responsesEnabled reports whether the client should use the Responses API
-// backend for the current turn. The zero value (unset) behaves like auto: the
-// Responses API is used whenever the model supports it (deepseek-v4-flash),
-// and server mode degrades softly to chat completions for other models.
+// backend for the current turn. An explicit api selection is the transport
+// authority and wins unconditionally; the zero value (auto) falls back to the
+// model-name heuristic, with web_search mode still governing: local search
+// forces chat completions, server/auto use the Responses API when the model
+// supports it.
 func (c *Client) responsesEnabled() bool {
+	switch c.api {
+	case APIResponses:
+		return true
+	case APIChatCompletions:
+		return false
+	}
 	switch c.webSearchMode {
 	case WebSearchModeServer, WebSearchModeAuto, "":
 		return isResponsesCapableModel(c.model)

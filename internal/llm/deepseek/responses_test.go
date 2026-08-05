@@ -709,3 +709,133 @@ func TestResponsesPrefixCompletionDegrades(t *testing.T) {
 		t.Fatalf("paths = %#v, want responses endpoint only (prefix degrades)", paths)
 	}
 }
+
+func TestNormalizeAPI(t *testing.T) {
+	for _, tc := range []struct {
+		in   string
+		want API
+		err  bool
+	}{
+		{in: "", want: APIAuto},
+		{in: "auto", want: APIAuto},
+		{in: "AUTO", want: APIAuto},
+		{in: "responses", want: APIResponses},
+		{in: "Responses", want: APIResponses},
+		{in: "chat_completions", want: APIChatCompletions},
+		{in: "CHAT_COMPLETIONS", want: APIChatCompletions},
+		// Strict grammar: aliases that name no real endpoint must fail, not
+		// silently fall back to the model-name heuristic.
+		{in: "completions", err: true},
+		{in: "chat", err: true},
+		{in: "resp", err: true},
+		{in: "responses_api", err: true},
+		{in: "bogus", err: true},
+	} {
+		got, err := NormalizeAPI(tc.in)
+		if tc.err {
+			if err == nil {
+				t.Fatalf("NormalizeAPI(%q): expected error", tc.in)
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatalf("NormalizeAPI(%q): %v", tc.in, err)
+		}
+		if got != tc.want {
+			t.Fatalf("NormalizeAPI(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestResolveTransportCompatRules(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		api       API
+		webSearch WebSearchMode
+		wantAPI   API
+		wantWeb   WebSearchMode
+		wantWarn  bool
+	}{
+		{name: "auto+server implies responses", api: APIAuto, webSearch: WebSearchModeServer, wantAPI: APIResponses, wantWeb: WebSearchModeServer},
+		{name: "auto+local stays auto", api: APIAuto, webSearch: WebSearchModeLocal, wantAPI: APIAuto, wantWeb: WebSearchModeLocal},
+		{name: "auto+unset stays auto", api: APIAuto, webSearch: "", wantAPI: APIAuto, wantWeb: ""},
+		{name: "responses+server keeps server", api: APIResponses, webSearch: WebSearchModeServer, wantAPI: APIResponses, wantWeb: WebSearchModeServer},
+		{name: "responses+local keeps local", api: APIResponses, webSearch: WebSearchModeLocal, wantAPI: APIResponses, wantWeb: WebSearchModeLocal},
+		{name: "responses+unset stays responses", api: APIResponses, webSearch: "", wantAPI: APIResponses, wantWeb: ""},
+		{name: "chat_completions+server degrades to local with warning", api: APIChatCompletions, webSearch: WebSearchModeServer, wantAPI: APIChatCompletions, wantWeb: WebSearchModeLocal, wantWarn: true},
+		{name: "chat_completions+local unchanged", api: APIChatCompletions, webSearch: WebSearchModeLocal, wantAPI: APIChatCompletions, wantWeb: WebSearchModeLocal},
+		{name: "chat_completions+unset unchanged", api: APIChatCompletions, webSearch: "", wantAPI: APIChatCompletions, wantWeb: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gotAPI, gotWeb, warn := ResolveTransport(tc.api, tc.webSearch)
+			if gotAPI != tc.wantAPI {
+				t.Fatalf("api = %q, want %q", gotAPI, tc.wantAPI)
+			}
+			if gotWeb != tc.wantWeb {
+				t.Fatalf("web_search = %q, want %q", gotWeb, tc.wantWeb)
+			}
+			if (warn != "") != tc.wantWarn {
+				t.Fatalf("warn = %q, want warn=%v", warn, tc.wantWarn)
+			}
+		})
+	}
+}
+
+func newClientWithTransport(t *testing.T, model string, opts ...Option) *Client {
+	t.Helper()
+	all := append([]Option{WithAPIKey("test-key"), WithModel(model)}, opts...)
+	c, err := New(all...)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	return c
+}
+
+func TestResponsesEnabledAPIEnum(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		model     string
+		api       API
+		webSearch WebSearchMode
+		want      bool
+	}{
+		// Explicit APIResponses wins for ANY model, including the retired
+		// chat alias the ACP entrypoint used to hardcode.
+		{name: "responses+v4 flash", model: "deepseek-v4-flash", api: APIResponses, want: true},
+		{name: "responses+retired chat alias", model: "deepseek-chat", api: APIResponses, want: true},
+		// Explicit APIChatCompletions wins for ANY model, including capable ones.
+		{name: "chat_completions+v4 flash", model: "deepseek-v4-flash", api: APIChatCompletions, want: false},
+		{name: "chat_completions+chat alias", model: "deepseek-chat", api: APIChatCompletions, want: false},
+		// Auto falls back to the model heuristic + web_search mode.
+		{name: "auto+v4 flash", model: "deepseek-v4-flash", api: APIAuto, want: true},
+		{name: "auto+chat alias", model: "deepseek-chat", api: APIAuto, want: false},
+		{name: "auto+v4 flash+local search", model: "deepseek-v4-flash", api: APIAuto, webSearch: WebSearchModeLocal, want: false},
+		{name: "auto+v4 flash+server search", model: "deepseek-v4-flash", api: APIAuto, webSearch: WebSearchModeServer, want: true},
+		{name: "unset api+v4 flash", model: "deepseek-v4-flash", want: true},
+		{name: "unset api+chat alias", model: "deepseek-chat", want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newClientWithTransport(t, tc.model, WithAPI(tc.api), WithWebSearchMode(tc.webSearch))
+			if got := c.responsesEnabled(); got != tc.want {
+				t.Fatalf("responsesEnabled() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestWithAPIRejectsEmptySelection(t *testing.T) {
+	// WithAPI must ignore an empty/auto value so the zero value cannot
+	// override a model-name inference.
+	c := newClientWithTransport(t, "deepseek-v4-flash")
+	if c.api != APIAuto {
+		t.Fatalf("api = %q, want APIAuto", c.api)
+	}
+	WithAPI(APIAuto)(c)
+	if c.api != APIAuto {
+		t.Fatalf("WithAPI(APIAuto) set api = %q, want APIAuto preserved", c.api)
+	}
+	WithAPI(APIChatCompletions)(c)
+	if c.api != APIChatCompletions {
+		t.Fatalf("WithAPI(APIChatCompletions) did not set api, got %q", c.api)
+	}
+}

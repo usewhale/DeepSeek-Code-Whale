@@ -47,6 +47,7 @@ type Client struct {
 	prefixCompletionEnabled bool
 	multimodal              MultimodalConfig
 	webSearchMode           WebSearchMode
+	api                     API
 	searchCalls             *webSearchCallRegistry
 }
 
@@ -112,6 +113,18 @@ func WithWebSearchMode(mode WebSearchMode) Option {
 	return func(c *Client) {
 		if strings.TrimSpace(string(mode)) != "" {
 			c.webSearchMode = mode
+		}
+	}
+}
+
+// WithAPI selects which DeepSeek endpoint the client speaks: the Responses
+// API or chat completions. The zero value (APIAuto) keeps the model-name
+// heuristic; an explicit selection is the transport authority and wins over
+// any inference (see responsesEnabled).
+func WithAPI(api API) Option {
+	return func(c *Client) {
+		if strings.TrimSpace(string(api)) != "" {
+			c.api = api
 		}
 	}
 }

@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/usewhale/whale/internal/agent"
 	"github.com/usewhale/whale/internal/core"
 	"github.com/usewhale/whale/internal/store"
 )
@@ -1013,5 +1014,22 @@ func TestSessionListConcurrentWithRewrite(t *testing.T) {
 	}
 	if !got["rewrite-me"] {
 		t.Fatalf("final list missing rewritten session rewrite-me")
+	}
+}
+
+func TestTranslateEventContextCompactedDroppedWithoutPanic(t *testing.T) {
+	h := newHandlerForTest(t, &factoryRecorder{})
+	// Compaction is an internal history rewrite. It must be dropped (nil),
+	// never surfaced as a stray agent message chunk, and must not panic even
+	// with a populated CompactInfo payload.
+	if u := h.translateEvent(agent.AgentEvent{Type: agent.AgentEventTypeContextCompacted}); u != nil {
+		t.Fatalf("ContextCompacted translated to %+v, want nil", u)
+	}
+	if u := h.translateEvent(agent.AgentEvent{
+		Type:    agent.AgentEventTypeContextCompacted,
+		Content: "compact",
+		Compact: &agent.CompactInfo{Compacted: true, BeforeEstimate: 900_000, AfterEstimate: 120_000},
+	}); u != nil {
+		t.Fatalf("ContextCompacted with info translated to %+v, want nil", u)
 	}
 }

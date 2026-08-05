@@ -23,6 +23,7 @@ type providerOptions struct {
 	DeepSeekPrefixCompletion bool
 	DeepSeekMultimodal       MultimodalProviderConfig
 	DeepSeekWebSearch        deepseek.WebSearchMode
+	DeepSeekAPI              deepseek.API
 }
 
 func newDeepSeekProvider(opts providerOptions) (llm.Provider, error) {
@@ -75,6 +76,7 @@ func newDeepSeekProvider(opts providerOptions) (llm.Provider, error) {
 		}))
 	}
 	dsOpts = append(dsOpts, deepseek.WithWebSearchMode(opts.DeepSeekWebSearch))
+	dsOpts = append(dsOpts, deepseek.WithAPI(opts.DeepSeekAPI))
 	return deepseek.New(dsOpts...)
 }
 

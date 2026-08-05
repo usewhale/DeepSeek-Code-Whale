@@ -16,6 +16,7 @@ const webFetchExtractorModel = "deepseek-v4-flash"
 type webFetchExtractorOptions struct {
 	APIKey  string
 	BaseURL string
+	API     deepseek.API
 }
 
 type deepSeekWebFetchExtractor struct {
@@ -37,6 +38,11 @@ func (e *deepSeekWebFetchExtractor) Extract(ctx context.Context, prompt, content
 	if strings.TrimSpace(e.opts.BaseURL) != "" {
 		dsOpts = append(dsOpts, deepseek.WithBaseURL(e.opts.BaseURL))
 	}
+	// Honor the user's explicit transport selection: the extractor pins its own
+	// model/thinking/tokens, but the API (responses vs chat_completions) is a
+	// config property — a chat-completions-only endpoint must not be sent
+	// /responses requests behind the user's back.
+	dsOpts = append(dsOpts, deepseek.WithAPI(e.opts.API))
 	provider, err := deepseek.New(dsOpts...)
 	if err != nil {
 		return "", err

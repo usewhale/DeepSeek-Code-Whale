@@ -117,9 +117,9 @@ model = "gpt-4o"
 
 This override is used only for turns that include attachments, such as `whale exec --attach screen.png "describe this"` or TUI prompts submitted after pasting an image or local image path. Normal text-only turns keep using the regular DeepSeek configuration. When DeepSeek multimodal becomes publicly available, point `base_url`, `api_key_env`, and `model` back to the DeepSeek-compatible values.
 
-### Server-side web search (Responses API)
+### Web search — where search runs
 
-DeepSeek's Responses API includes a server-executed web search: no third-party search key is needed, search runs on DeepSeek's servers and the results are fed directly to the model. Only the **`deepseek-v4-flash`** model currently supports it.
+The `web_search` setting decides **where** search runs: inside Whale's tool system (`local`) or on DeepSeek's servers (`server`). It does **not** select the API transport — that is a separate knob (`api`, next section). `server` search is part of DeepSeek's Responses API: no third-party search key is needed, search runs on DeepSeek's servers and the results are fed directly to the model. Only the **`deepseek-v4-flash`** model currently supports server-side search.
 
 ```toml
 # Default (no config needed): deepseek-v4-flash uses the server-side search.
@@ -129,8 +129,8 @@ model = "deepseek-v4-flash"
 ```
 
 - `auto` (**default**, the behavior when unset): uses `server` for `deepseek-v4-flash`, `local` for everything else.
-- `local`: current behavior. `web_search` is Whale's local tool (DuckDuckGo with Bing fallback), executed by the tool system.
-- `server`: forces the DeepSeek Responses API and translates the local `web_search` tool into the server-side built-in search. The model answers in the same response turn with search results already incorporated; no local tool dispatch happens. If the model is not `deepseek-v4-flash`, it degrades silently to `local` behavior.
+- `local`: search runs inside Whale's tool system — the local `web_search` tool (DuckDuckGo with Bing fallback), executed by the tool system.
+- `server`: search runs on DeepSeek's servers via the Responses API and the results are incorporated into the model's answer in the same response turn; no local tool dispatch happens. Requires the Responses API transport: if the transport is explicitly `chat_completions`, `server` degrades to `local` with a warning — never by refusing to start.
 
 Notes:
 
@@ -138,6 +138,21 @@ Notes:
 - Search context (`web_search_call` items) is kept in process memory; after a restart, resumed sessions re-run the search (still correct, just one extra search).
 - In `server` mode with thinking disabled, the request sends `reasoning.effort = "none"` explicitly (the Responses API enables thinking by default).
 - Turns with attachments still use the multimodal channel and are unaffected by `web_search = "server"`.
+
+### API transport — Responses API vs chat completions
+
+Whale speaks to DeepSeek over one of two transports: the **Responses API** (`POST /responses`) or the **chat completions API** (`POST /chat/completions`). The `api` setting selects the transport explicitly; the model still picks the payload shape, so the two are decoupled. The `api` knob is the transport authority — `web_search = "server"` is at best an *inference* that the Responses API is in use, so it can imply the Responses API but never overrides an explicit `chat_completions` choice.
+
+```toml
+[providers.deepseek]
+api = "auto"   # auto (default) | responses | chat_completions
+```
+
+- `auto` (**default**, the behavior when unset): the transport is inferred — `deepseek-v4-flash` uses the Responses API, and `web_search = "server"` also implies the Responses API; everything else uses chat completions.
+- `responses`: always speaks the Responses API, for any model.
+- `chat_completions`: always speaks chat completions, for any model. If `web_search = "server"` is also set, the conflict is resolved by degrading `web_search` to `local` with a warning — never by refusing to start.
+
+The same selection is available as the `WHALE_API` environment variable (`responses` | `chat_completions` | `auto`); the env var wins over the config value. The ACP entrypoint (`whale-acp`, the agent Zed runs) reads `WHALE_API` directly — it does not read `config.toml` provider settings.
 
 ---
 
@@ -205,6 +220,10 @@ enabled = true                         # configure each plugin by id
 [experimental]
 deepseek_prefix_completion = false     # DeepSeek Prefix completion (experimental)
 
+[providers.deepseek]
+web_search = "auto"                    # where search runs: local | server | auto
+api = "auto"                           # API transport: responses | chat_completions | auto
+
 [providers.deepseek.multimodal]
 enabled = false                        # Route attachment turns through an OpenAI-compatible multimodal endpoint
 compat = "openai"
@@ -224,6 +243,19 @@ level = "info"                         # debug | info | warn | error
 | `WHALE_HOME` | Global data directory (`~/.whale`) |
 | `HTTP_PROXY` / `HTTPS_PROXY` | Proxy settings in config |
 | `WHALE_MCP_CONFIG` | MCP config file path |
+| `WHALE_API` | API transport (`responses` \| `chat_completions` \| `auto`); env wins over the config value |
+
+The following variables apply to the ACP entrypoint (`whale-acp`, the agent Zed runs). They are read once at process start — changing them requires restarting the agent process:
+
+| Variable | Overrides |
+|---|---|
+| `WHALE_MODEL` | Model name (validated against the supported set; default `deepseek-v4-flash`) |
+| `WHALE_API` | API transport (`responses` \| `chat_completions` \| `auto`) |
+| `WHALE_COMPACT_THRESHOLD` | Auto-compaction trigger as a fraction of the context window, e.g. `0.85` |
+| `WHALE_CONTEXT_WINDOW` | Context-window override in tokens (default derived from the model: 1M for V4 models) |
+| `WHALE_MAX_TOOL_ITERS` | Per-turn tool-iteration cap (default `300`) |
+
+Auto-compaction counts tokens, not cost: a heavily cached prompt prefix costs almost nothing yet still counts against the window, so a large cached session is compacted exactly like an uncached one.
 
 ### Worktrees
 

@@ -39,6 +39,7 @@ func (a *App) rebuildTaskRuntimeLocked() error {
 			DeepSeekPrefixCompletion: cfg.DeepSeekPrefixCompletion,
 			DeepSeekMultimodal:       cfg.DeepSeekMultimodal,
 			DeepSeekWebSearch:        cfg.DeepSeekWebSearch,
+			DeepSeekAPI:              cfg.DeepSeekAPI,
 		})
 	}
 	providerFactoryWithOptions := func(req tasks.ProviderRequest) (llm.Provider, error) {
@@ -60,6 +61,7 @@ func (a *App) rebuildTaskRuntimeLocked() error {
 			DeepSeekPrefixCompletion: cfg.DeepSeekPrefixCompletion,
 			DeepSeekMultimodal:       cfg.DeepSeekMultimodal,
 			DeepSeekWebSearch:        cfg.DeepSeekWebSearch,
+			DeepSeekAPI:              cfg.DeepSeekAPI,
 		})
 	}
 	workspaceTools := func(workspace tasks.ToolWorkspace) (*core.ToolRegistry, error) {
@@ -90,6 +92,7 @@ func (a *App) rebuildTaskRuntimeLocked() error {
 		toolset.SetWebFetchExtractor(newDeepSeekWebFetchExtractor(webFetchExtractorOptions{
 			APIKey:  apiKey,
 			BaseURL: cfg.APIBaseURL,
+			API:     cfg.DeepSeekAPI,
 		}))
 		return core.NewToolRegistryChecked(toolset.Tools())
 	}
