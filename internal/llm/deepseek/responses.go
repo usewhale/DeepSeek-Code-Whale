@@ -197,15 +197,13 @@ func toResponsesTools(tools []core.Tool) []map[string]any {
 func toResponsesInputItems(history []core.Message, searchCalls []map[string]any) []map[string]any {
 	out := make([]map[string]any, 0, len(history)*2)
 	syntheticCallCount := 0
-	// function_calls are held back until their tool results arrive so each
-	// function_call item can be emitted immediately before its
-	// function_call_output item. The Responses API requires the pair to be
-	// adjacent (no other item in between); interleaving a reasoning item
-	// between them makes the server reject the request with "No tool output
-	// found for tool call ...".
+	// Keep every function_call from one assistant turn adjacent. DeepSeek
+	// merges adjacent reasoning/function_call items into a single assistant
+	// message. Interleaving a function_call_output between parallel calls
+	// splits that assistant message, so the later call loses the turn's
+	// reasoning_text and thinking mode rejects the request.
 	type pendingCall struct {
 		id      string
-		item    map[string]any
 		removed bool
 	}
 	var pending []*pendingCall
@@ -215,7 +213,6 @@ func toResponsesInputItems(history []core.Message, searchCalls []map[string]any)
 			if pc.removed {
 				continue
 			}
-			out = append(out, pc.item)
 			out = append(out, map[string]any{
 				"type":    "function_call_output",
 				"call_id": pc.id,
@@ -261,15 +258,15 @@ func toResponsesInputItems(history []core.Message, searchCalls []map[string]any)
 				}
 				pc := &pendingCall{
 					id: id,
-					item: map[string]any{
-						"type":      "function_call",
-						"call_id":   id,
-						"name":      core.DisplayToolName(tc.Name),
-						"arguments": tc.Input,
-					},
 				}
 				pending = append(pending, pc)
 				pendingByID[id] = pc
+				out = append(out, map[string]any{
+					"type":      "function_call",
+					"call_id":   id,
+					"name":      core.DisplayToolName(tc.Name),
+					"arguments": tc.Input,
+				})
 			}
 		case core.RoleTool:
 			for _, tr := range msg.ToolResults {
@@ -277,9 +274,6 @@ func toResponsesInputItems(history []core.Message, searchCalls []map[string]any)
 				if pc == nil || pc.removed {
 					continue
 				}
-				// Emit the pair adjacent: function_call immediately followed
-				// by its function_call_output.
-				out = append(out, pc.item)
 				out = append(out, map[string]any{
 					"type":    "function_call_output",
 					"call_id": pc.id,

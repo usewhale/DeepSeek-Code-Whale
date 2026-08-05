@@ -52,10 +52,20 @@ func runShellPTY(ctx context.Context, cmd *exec.Cmd, task *shellTask) error {
 		_ = ptmx.Close()
 		return killPTYCommandGroup(cmd)
 	})
-	_ = ptmx.Close()
+	// On normal exit, let the reader observe the slave-side EOF and drain any
+	// output queued just before the process exited. Closing the master first can
+	// discard that tail (for example, the final line printed after read returns).
 	select {
 	case <-readDone:
 	case <-time.After(2 * time.Second):
+		// A misbehaving PTY must not keep the task alive forever. Closing the
+		// master unblocks io.Copy; wait once more so it cannot write into the
+		// task buffer after the task has been marked complete.
+		_ = ptmx.Close()
+		select {
+		case <-readDone:
+		case <-time.After(2 * time.Second):
+		}
 	}
 	return err
 }
