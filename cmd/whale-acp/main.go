@@ -8,6 +8,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -422,9 +423,9 @@ func wireMCPServers(ts *tools.Toolset, dataDir, cwd string, mcps []acp.MCPServer
 		for _, st := range mcpManager.States() {
 			switch st.Status {
 			case whalemcp.StatusFailed, whalemcp.StatusCancelled:
-				acp.Logger.Printf("mcp server %s: %s (%s)", st.Name, st.Status, st.Error)
+				acp.Logger.Printf("mcp server %s: %s (%s)", sanitizeLogName(st.Name), st.Status, sanitizeLogName(st.Error))
 			default:
-				acp.Logger.Printf("mcp server %s: %s (%d tools)", st.Name, st.Status, len(st.ToolNames))
+				acp.Logger.Printf("mcp server %s: %s (%d tools)", sanitizeLogName(st.Name), st.Status, len(st.ToolNames))
 			}
 		}
 		if catalog := mcpManager.BuildDeferredCatalog(); catalog != nil && !catalog.Empty() {
@@ -464,6 +465,19 @@ func mcpConfigForSession(dataDir string, mcps []acp.MCPServer) (whalemcp.Config,
 	if err != nil {
 		return cfg, err
 	}
+	if len(mcps) > 0 {
+		// Client-supplied servers are arbitrary stdio processes spawned with
+		// the whale-acp user's privileges. That is the ACP trust model (the
+		// host is fully trusted), but make it visible in the log.
+		acp.Logger.Printf("connecting %d MCP server(s) supplied by the ACP client", len(mcps))
+	}
+	for _, name := range sortedKeys(cfg.Servers) {
+		if srv := cfg.Servers[name]; strings.TrimSpace(srv.URL) != "" {
+			// The local baseline is passed through unchanged (matching the main
+			// app), but http transport is outside the stdio-only advertisement.
+			acp.Logger.Printf("baseline mcp server %s uses url transport (%s); whale-acp advertises stdio only", sanitizeLogName(name), sanitizeLogName(srv.URL))
+		}
+	}
 	for _, m := range mcps {
 		name := strings.TrimSpace(m.Name)
 		if name == "" {
@@ -471,7 +485,7 @@ func mcpConfigForSession(dataDir string, mcps []acp.MCPServer) (whalemcp.Config,
 		}
 		if kind := clientMCPServerTransport(m); kind != "stdio" {
 			// We advertise mcpCapabilities {http:false, sse:false} — stdio only.
-			acp.Logger.Printf("mcp server %s: unsupported transport %q (stdio only), skipping", name, kind)
+			acp.Logger.Printf("mcp server %s: unsupported transport %q (stdio only), skipping", sanitizeLogName(name), kind)
 			continue
 		}
 		cfg.Servers[name] = whalemcp.ServerConfig{
@@ -498,6 +512,30 @@ func envVariableMap(envs []acp.EnvVariable) map[string]string {
 			out[e.Name] = e.Value
 		}
 	}
+	return out
+}
+
+// sanitizeLogName strips control characters (log-injection defense) before a
+// value is written to the log: newline/CR/tab and the rest of the C0 controls
+// plus DEL are replaced with spaces so a client-supplied server name or error
+// cannot forge log lines or inject terminal sequences.
+func sanitizeLogName(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r < ' ' || r == 0x7f {
+			return ' '
+		}
+		return r
+	}, s)
+}
+
+// sortedKeys returns the sorted keys of a string-keyed map, for deterministic
+// iteration order in logs.
+func sortedKeys[V any](m map[string]V) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
 	return out
 }
 

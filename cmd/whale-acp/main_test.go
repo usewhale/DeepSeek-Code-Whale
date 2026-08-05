@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -503,5 +505,78 @@ func TestContextWindowFromEnv(t *testing.T) {
 				t.Fatalf("expected error for window %q", bad)
 			}
 		})
+	}
+}
+
+// TestSanitizeLogName verifies control characters are stripped before server
+// names/errors hit the log (log-injection defense), including the C0 controls
+// and DEL beyond newline/CR/tab.
+func TestSanitizeLogName(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"evil\nserver\r\tname", "evil server  name"},
+		{"plain-name", "plain-name"},
+		{"", ""},
+		{"nul\x00esc\x1bdel\x7f", "nul esc del "},
+		{"tab\there", "tab here"},
+	}
+	for _, c := range cases {
+		if got := sanitizeLogName(c.in); got != c.want {
+			t.Errorf("sanitizeLogName(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// TestSortedKeys verifies deterministic iteration order for logs.
+func TestSortedKeys(t *testing.T) {
+	if got := sortedKeys(map[string]int{}); len(got) != 0 {
+		t.Fatalf("empty map: %v", got)
+	}
+	got := sortedKeys(map[string]int{"z": 1, "a": 2, "m": 3})
+	if strings.Join(got, ",") != "a,m,z" {
+		t.Fatalf("sortedKeys = %v, want a,m,z", got)
+	}
+}
+
+// writeMCPConfig writes an mcp.json baseline into dir.
+func writeMCPConfig(t *testing.T, dir string, servers map[string]any) {
+	t.Helper()
+	b, err := json.Marshal(map[string]any{"mcpServers": servers})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "mcp.json"), b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+// TestMCPConfigForSessionLogLines verifies the changed log sites in
+// mcpConfigForSession: the client-supplied server count and the baseline http
+// url-transport warning are both emitted and sanitized.
+func TestMCPConfigForSessionLogLines(t *testing.T) {
+	var logs bytes.Buffer
+	prev := acp.Logger
+	acp.Logger = log.New(&logs, "", 0)
+	defer func() { acp.Logger = prev }()
+
+	dataDir := t.TempDir()
+	writeMCPConfig(t, dataDir, map[string]any{
+		"baseline-http": map[string]any{"url": "http://127.0.0.1:9999"},
+	})
+	client := []acp.MCPServer{
+		{Name: "client-a", Command: "/bin/echo", Args: []string{"hi"}},
+		{Name: "client-b", Command: "/bin/echo", Args: []string{"bye"}},
+	}
+	cfg, err := mcpConfigForSession(dataDir, client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Servers["client-a"].Command; got != "/bin/echo" {
+		t.Fatalf("client server not merged into config: %+v", cfg.Servers["client-a"])
+	}
+	out := logs.String()
+	if !strings.Contains(out, "connecting 2 MCP server(s) supplied by the ACP client") {
+		t.Errorf("missing client-count log line, got:\n%s", out)
+	}
+	if !strings.Contains(out, "baseline mcp server baseline-http uses url transport") {
+		t.Errorf("missing baseline url-transport warning, got:\n%s", out)
 	}
 }
