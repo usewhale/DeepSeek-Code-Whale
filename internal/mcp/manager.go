@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -235,8 +234,13 @@ func (m *Manager) startServer(ctx context.Context, srv ServerConfig) (*clientSes
 		if isContextTimeout(timeoutCtx, err) {
 			return nil, nil, nil, startupTimeoutErr(srv, "connect")
 		}
-		if errors.Is(err, io.EOF) && stdioCmd != nil {
-			err = maybeStdioErr(err, stdioCmd)
+		if stdioCmd != nil {
+			// Enrich ANY stdio connect failure with the captured stderr, not
+			// just io.EOF: a server that exits before the handshake write
+			// surfaces as EPIPE on Linux ("write |1: broken pipe"), which
+			// errors.Is(err, io.EOF) misses — the diagnostic stderr was then
+			// silently dropped.
+			err = maybeStdioErr(err, stdioCmd, transport)
 		}
 		return nil, nil, nil, startupErr(srv, "connect", err, httpDiag)
 	}
@@ -399,9 +403,12 @@ func createTransport(ctx context.Context, kind string, srv ServerConfig) (sdk.Tr
 		cmd := exec.CommandContext(ctx, expandStdioCommand(srv.Command), expandStdioArgs(srv.Args)...)
 		cmd.Env = append(os.Environ(), env...)
 		shell.ConfigureCommand(cmd)
+		stderrBuf := &boundedStderr{}
+		cmd.Stderr = stderrBuf // the SDK only touches stdout/stdin
 		transport := &stdioProcessTransport{
-			base: &sdk.CommandTransport{Command: cmd},
-			cmd:  cmd,
+			base:   &sdk.CommandTransport{Command: cmd},
+			cmd:    cmd,
+			stderr: stderrBuf,
 		}
 		return transport, cmd, nil, nil
 	case "http":
@@ -743,7 +750,15 @@ func expandWindowsPercentEnv(value string, getenv func(string) string) string {
 	return out.String()
 }
 
-func maybeStdioErr(err error, cmd *exec.Cmd) error {
+func maybeStdioErr(err error, cmd *exec.Cmd, transport sdk.Transport) error {
+	// Prefer the captured stderr from the original spawn — no re-spawn needed.
+	if st, ok := transport.(*stdioProcessTransport); ok && st.stderr != nil {
+		if out := strings.TrimSpace(st.stderr.String()); out != "" {
+			return errors.Join(err, fmt.Errorf("%s", out))
+		}
+	}
+	// Fallback for empty captures (e.g. the copy goroutine hadn't flushed):
+	// re-run once to collect diagnostics.
 	checkErr := stdioCheck(cmd)
 	if checkErr == nil {
 		return err
