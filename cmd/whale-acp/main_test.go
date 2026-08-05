@@ -12,6 +12,7 @@ import (
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/usewhale/whale/internal/acp"
 	"github.com/usewhale/whale/internal/core"
+	whalemcp "github.com/usewhale/whale/internal/mcp"
 	"github.com/usewhale/whale/internal/tools"
 )
 
@@ -270,5 +271,48 @@ func TestWireMCPServersNoConfigNoDeferredTools(t *testing.T) {
 		if tool.Name() == "tool_search" {
 			t.Fatal("tool_search present without MCP catalog")
 		}
+	}
+}
+
+// TestWireMCPServersFailedServerNoCatalog verifies that a server that cannot
+// start is reported as failed and yields no mcp__ tools and no tool_search
+// (empty deferred catalog) instead of crashing session creation.
+func TestWireMCPServersFailedServerNoCatalog(t *testing.T) {
+	dataDir := t.TempDir()
+	cfg := map[string]any{
+		"mcpServers": map[string]any{
+			"boom": map[string]any{
+				"command": "/nonexistent/definitely-not-a-binary",
+				"timeout": 2,
+			},
+		},
+	}
+	b, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dataDir, "mcp.json"), b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ts, err := tools.NewToolset(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	mgr, reg := wireMCPServers(ts, dataDir, t.TempDir(), nil)
+	if mgr == nil {
+		t.Fatal("expected a manager when servers are configured")
+	}
+	t.Cleanup(func() { _ = mgr.Close() })
+	for _, tool := range reg.Tools() {
+		if strings.HasPrefix(tool.Name(), "mcp__") {
+			t.Fatalf("unexpected mcp tool from failed server: %s", tool.Name())
+		}
+		if tool.Name() == "tool_search" {
+			t.Fatal("tool_search present with empty catalog")
+		}
+	}
+	states := mgr.States()
+	if len(states) != 1 || states[0].Status != whalemcp.StatusFailed {
+		t.Fatalf("expected one failed server state, got %+v", states)
 	}
 }
