@@ -3,6 +3,7 @@ package app
 import (
 	"fmt"
 	"github.com/usewhale/whale/internal/core"
+	"github.com/usewhale/whale/internal/llm/deepseek"
 	"github.com/usewhale/whale/internal/plugins"
 	"github.com/usewhale/whale/internal/policy"
 	"github.com/usewhale/whale/internal/store"
@@ -61,6 +62,13 @@ func ApplyFileConfig(cfg *Config, file FileConfig) error {
 	}
 	if err := applyMultimodalProviderConfig(cfg, file.Providers.DeepSeek.Multimodal); err != nil {
 		return err
+	}
+	if strings.TrimSpace(file.Providers.DeepSeek.WebSearch) != "" {
+		mode, err := deepseek.NormalizeWebSearchMode(file.Providers.DeepSeek.WebSearch)
+		if err != nil {
+			return err
+		}
+		cfg.DeepSeekWebSearch = mode
 	}
 	if file.Retry.MaxAttempts != nil {
 		if *file.Retry.MaxAttempts < 0 {
@@ -256,6 +264,9 @@ func overlayExplicitConfig(dst *Config, src Config) {
 	}
 	if src.DeepSeekMultimodal != def.DeepSeekMultimodal {
 		dst.DeepSeekMultimodal = normalizeMultimodalProviderConfig(src.DeepSeekMultimodal)
+	}
+	if src.DeepSeekWebSearch != def.DeepSeekWebSearch {
+		dst.DeepSeekWebSearch = src.DeepSeekWebSearch
 	}
 	if src.ShellForegroundWaitDefaultMS != 0 && src.ShellForegroundWaitDefaultMS != def.ShellForegroundWaitDefaultMS {
 		dst.ShellForegroundWaitDefaultMS = src.ShellForegroundWaitDefaultMS

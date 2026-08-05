@@ -46,6 +46,8 @@ type Client struct {
 	streamIdleTimeout       time.Duration
 	prefixCompletionEnabled bool
 	multimodal              MultimodalConfig
+	webSearchMode           WebSearchMode
+	searchCalls             *webSearchCallRegistry
 }
 
 type Option func(*Client)
@@ -102,6 +104,18 @@ func WithMultimodal(cfg MultimodalConfig) Option {
 	}
 }
 
+// WithWebSearchMode selects where web search runs: local (default, chat
+// completions plus Whale's own web_search tool), server (Responses API with
+// DeepSeek's built-in web_search), or auto (Responses API when the model
+// supports it).
+func WithWebSearchMode(mode WebSearchMode) Option {
+	return func(c *Client) {
+		if strings.TrimSpace(string(mode)) != "" {
+			c.webSearchMode = mode
+		}
+	}
+}
+
 func WithRetryPolicy(policy llmretry.Policy) Option {
 	return func(c *Client) { c.retryPolicy = llmretry.NormalizePolicy(policy) }
 }
@@ -143,6 +157,7 @@ func New(opts ...Option) (*Client, error) {
 		retrySleeper:      llmretry.Sleep,
 		streamMaxAttempts: defaultStreamMaxAttempts,
 		streamIdleTimeout: defaultStreamIdleTimeout,
+		searchCalls:       &webSearchCallRegistry{},
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -203,6 +218,9 @@ func (c *Client) stream(ctx context.Context, history []core.Message, tools []cor
 	if latestUserMessageHasAttachments(history) {
 		return c.streamMultimodal(ctx, history, tools, out)
 	}
+	if c.responsesEnabled() {
+		return c.streamResponses(ctx, history, tools, out)
+	}
 	msgs, sanitizeDiag := sanitizeDeepSeekMessagesForRequest(toDeepSeekMessages(history), c.thinkingEnabled)
 	replayDiag := toolResultReplayDiagnostics(history, msgs)
 	payload := map[string]any{
@@ -238,6 +256,12 @@ func (c *Client) streamPrefix(ctx context.Context, history []core.Message, prefi
 	// prefixCompletionEnabled auto-flag: callers that pass a prefix are opting in
 	// directly (e.g. plan-finalization recovery). The flag only governs implicit
 	// use. Endpoint incompatibility still falls back via prefixCompletionBaseURL.
+	if c.responsesEnabled() {
+		// The Responses API has no prefix-completion endpoint; degrade to a
+		// plain stream (tools are dropped the same way the attachments path
+		// drops them).
+		return c.stream(ctx, history, nil, out)
+	}
 	if latestUserMessageHasAttachments(history) || strings.TrimSpace(prefix) == "" {
 		return c.stream(ctx, history, nil, out)
 	}
@@ -386,11 +410,15 @@ func (c *Client) sendStreamRequest(ctx context.Context, requestBaseURL string, b
 }
 
 func (c *Client) sendStreamRequestWithKey(ctx context.Context, requestBaseURL, apiKey string, body []byte) (*http.Response, error) {
+	return c.sendStreamRequestWithKeyPath(ctx, requestBaseURL, apiKey, body, "/chat/completions")
+}
+
+func (c *Client) sendStreamRequestWithKeyPath(ctx context.Context, requestBaseURL, apiKey string, body []byte, path string) (*http.Response, error) {
 	requestBaseURL = strings.TrimRight(strings.TrimSpace(requestBaseURL), "/")
 	if requestBaseURL == "" {
 		requestBaseURL = c.baseURL
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, requestBaseURL+"/chat/completions", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, requestBaseURL+path, bytes.NewReader(body))
 	if err != nil {
 		return nil, &requestBuildError{err: fmt.Errorf("new request: %w", err)}
 	}
@@ -491,6 +519,10 @@ func shouldRetryStreamError(err error) bool {
 	}
 	var progressErr *streamProgressError
 	if errors.As(err, &progressErr) {
+		return false
+	}
+	var responsesErr *responsesTerminalError
+	if errors.As(err, &responsesErr) {
 		return false
 	}
 	if errors.As(err, &terminalErr) {

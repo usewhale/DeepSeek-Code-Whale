@@ -38,6 +38,7 @@ func (a *App) rebuildTaskRuntimeLocked() error {
 			StreamIdleTimeout:        cfg.RetryStreamIdleTimeout,
 			DeepSeekPrefixCompletion: cfg.DeepSeekPrefixCompletion,
 			DeepSeekMultimodal:       cfg.DeepSeekMultimodal,
+			DeepSeekWebSearch:        cfg.DeepSeekWebSearch,
 		})
 	}
 	providerFactoryWithOptions := func(req tasks.ProviderRequest) (llm.Provider, error) {
@@ -58,6 +59,7 @@ func (a *App) rebuildTaskRuntimeLocked() error {
 			StreamIdleTimeout:        cfg.RetryStreamIdleTimeout,
 			DeepSeekPrefixCompletion: cfg.DeepSeekPrefixCompletion,
 			DeepSeekMultimodal:       cfg.DeepSeekMultimodal,
+			DeepSeekWebSearch:        cfg.DeepSeekWebSearch,
 		})
 	}
 	workspaceTools := func(workspace tasks.ToolWorkspace) (*core.ToolRegistry, error) {

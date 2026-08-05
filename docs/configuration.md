@@ -117,6 +117,28 @@ model = "gpt-4o"
 
 这个 override 只用于带附件的 turn，例如 `whale exec --attach screen.png "describe this"`，或者在 TUI 里粘贴图片/本地图片路径后提交的 prompt。普通纯文本 turn 仍使用常规 DeepSeek 配置。DeepSeek 多模态公开可用后，把 `base_url`、`api_key_env` 和 `model` 指回 DeepSeek 兼容值即可。
 
+### 服务端联网搜索（Responses API）
+
+DeepSeek 在 Responses API 里内置了服务端执行的联网搜索：不需要第三方搜索密钥，搜索在 DeepSeek 服务器上完成并直接喂给模型。目前**仅 `deepseek-v4-flash` 模型**支持。
+
+```toml
+# 默认（不配置时）deepseek-v4-flash 就使用服务端内置搜索：
+[providers.deepseek]
+model = "deepseek-v4-flash"
+# web_search = "auto"   # auto(默认) | local | server
+```
+
+- `auto`（**默认**，不配置即此行为）：模型是 `deepseek-v4-flash` 时走 `server`，其他模型走 `local`。
+- `local`：现有行为不变。`web_search` 是 Whale 本地工具（DuckDuckGo + Bing 回退），由工具系统执行。
+- `server`：强制改用 DeepSeek Responses API，把本地 `web_search` 工具翻译为服务端内置搜索。模型直接在同一轮响应里带着搜索结果作答，不经过本地工具分发。若模型不是 `deepseek-v4-flash`，自动降级为 `local` 行为（不会报错）。
+
+注意事项：
+
+- 服务端搜索无法控制搜索参数（`search_context_size`、`user_location` 会被忽略），搜索时机由服务端 `tool_choice: auto` 决定。
+- 搜索上下文（`web_search_call` item）保存在进程内，重启后会话恢复时会重新搜索（结果仍然正确，只是多花一次搜索）。
+- `server` 模式下思考关闭时请求会显式传 `reasoning.effort = "none"`（Responses API 默认开启思考）。
+- 带附件的 turn 仍然走多模态通道，不受 `web_search = "server"` 影响。
+
 ---
 
 ## 参考

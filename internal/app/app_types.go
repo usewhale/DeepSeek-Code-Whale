@@ -7,6 +7,7 @@ import (
 
 	"github.com/usewhale/whale/internal/agent"
 	"github.com/usewhale/whale/internal/core"
+	"github.com/usewhale/whale/internal/llm/deepseek"
 	"github.com/usewhale/whale/internal/lsp"
 	whalemcp "github.com/usewhale/whale/internal/mcp"
 	"github.com/usewhale/whale/internal/plugins"
@@ -48,6 +49,7 @@ type Config struct {
 	RetryMaxDelay                  time.Duration
 	DeepSeekPrefixCompletion       bool
 	DeepSeekMultimodal             MultimodalProviderConfig
+	DeepSeekWebSearch              deepseek.WebSearchMode
 	ShellForegroundWaitDefaultMS   int
 	ShellForegroundWaitMaxMS       int
 	MaxParallelSubagents           int

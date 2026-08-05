@@ -10,6 +10,7 @@ import (
 	"testing"
 	"unicode/utf8"
 
+	"github.com/usewhale/whale/internal/llm/deepseek"
 	"github.com/usewhale/whale/internal/session"
 	"github.com/usewhale/whale/internal/store"
 )
@@ -20,7 +21,20 @@ import (
 // is dropped from the final output once the recovery turn re-streams the real
 // answer. Guards the downstream half of the leaked-tool-call fix (the agent
 // emits a response reset; exec must honor it).
+// localExecConfig returns a default config pinned to the local web_search
+// mode: these exec tests mock the chat-completions endpoint, and the default
+// (auto) mode would route deepseek-v4-flash through the Responses API.
+func localExecConfig() Config {
+	cfg := DefaultConfig()
+	cfg.DeepSeekWebSearch = deepseek.WebSearchModeLocal
+	return cfg
+}
+
 func TestRunExecScrubsLeakedToolCallFromOutput(t *testing.T) {
+	// Isolate from the user's global config (~/.whale): RunExec reloads real
+	// config files, and a web_search = "server" in the user's config would
+	// route this mock (chat-completions only) through the Responses API.
+	t.Setenv("WHALE_HOME", t.TempDir())
 	t.Setenv("DEEPSEEK_API_KEY", "sk-1234567890abcdef1234")
 	var mu sync.Mutex
 	reqs := 0
@@ -42,7 +56,7 @@ func TestRunExecScrubsLeakedToolCallFromOutput(t *testing.T) {
 	defer srv.Close()
 	t.Setenv("DEEPSEEK_BASE_URL", srv.URL)
 
-	res, err := RunExec(context.Background(), DefaultConfig(), StartOptions{NewSession: true}, "read a.go")
+	res, err := RunExec(context.Background(), localExecConfig(), StartOptions{NewSession: true}, "read a.go")
 	if err != nil {
 		t.Fatalf("RunExec: %v", err)
 	}
@@ -58,6 +72,8 @@ func TestRunExecScrubsLeakedToolCallFromOutput(t *testing.T) {
 }
 
 func TestRunExecReturnsFinalOutput(t *testing.T) {
+	// Isolate from the user's global config, same as the scrub test above.
+	t.Setenv("WHALE_HOME", t.TempDir())
 	t.Setenv("DEEPSEEK_API_KEY", "sk-1234567890abcdef1234")
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -68,7 +84,7 @@ func TestRunExecReturnsFinalOutput(t *testing.T) {
 	defer srv.Close()
 	t.Setenv("DEEPSEEK_BASE_URL", srv.URL)
 
-	res, err := RunExec(context.Background(), DefaultConfig(), StartOptions{NewSession: true}, "hi")
+	res, err := RunExec(context.Background(), localExecConfig(), StartOptions{NewSession: true}, "hi")
 	if err != nil {
 		t.Fatalf("RunExec: %v", err)
 	}
@@ -92,7 +108,7 @@ func TestRunExecNewSessionIDsDiffer(t *testing.T) {
 	defer srv.Close()
 	t.Setenv("DEEPSEEK_BASE_URL", srv.URL)
 
-	cfg := DefaultConfig()
+	cfg := localExecConfig()
 	cfg.DataDir = t.TempDir()
 
 	first, err := RunExec(context.Background(), cfg, StartOptions{NewSession: true}, "hi")
@@ -117,7 +133,7 @@ func TestRunExecNewSessionDefaultsToAgentMode(t *testing.T) {
 	defer srv.Close()
 	t.Setenv("DEEPSEEK_BASE_URL", srv.URL)
 
-	cfg := DefaultConfig()
+	cfg := localExecConfig()
 	cfg.DataDir = t.TempDir()
 
 	res, err := RunExec(context.Background(), cfg, StartOptions{NewSession: true}, "hi")
