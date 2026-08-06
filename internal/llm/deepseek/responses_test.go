@@ -233,10 +233,12 @@ func TestResponsesMixedFunctionCallAndSearch(t *testing.T) {
 	// The server-side search call must be recorded for echo on later turns.
 	if got := c.searchCalls.lookup("s2"); len(got) != 1 {
 		t.Fatalf("recorded search calls = %#v, want 1", got)
-	} else if got[0]["id"] != "ws_2" {
+	} else if len(got[0].items) != 1 || got[0].items[0]["id"] != "ws_2" {
 		t.Fatalf("recorded search call = %#v", got[0])
-	} else if got[0]["action"] == nil {
+	} else if got[0].items[0]["action"] == nil {
 		t.Fatalf("recorded search call must keep the full action payload: %#v", got[0])
+	} else if got[0].assistantKey == "" {
+		t.Fatal("recorded search call must be associated with its assistant response")
 	}
 }
 
@@ -254,6 +256,7 @@ func TestResponsesEchoesSearchCallsOnNextTurn(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		if requests == 1 {
+			_, _ = fmt.Fprint(w, "data: {\"type\":\"response.reasoning_text.delta\",\"sequence_number\":0,\"delta\":\"need search\"}\n\n")
 			_, _ = fmt.Fprint(w, "data: {\"type\":\"response.completed\",\"sequence_number\":1,\"response\":{\"id\":\"r1\",\"status\":\"completed\",\"output\":[{\"type\":\"web_search_call\",\"id\":\"ws_9\"},{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"答案是42\"}]}],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n")
 		} else {
 			_, _ = fmt.Fprint(w, "data: {\"type\":\"response.completed\",\"sequence_number\":1,\"response\":{\"id\":\"r2\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"继续\"}]}],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n")
@@ -285,7 +288,7 @@ func TestResponsesEchoesSearchCallsOnNextTurn(t *testing.T) {
 	second := c.StreamResponse(context.Background(),
 		[]core.Message{
 			{SessionID: "s9", Role: core.RoleUser, Text: "搜一下"},
-			{SessionID: "s9", Role: core.RoleAssistant, Text: "答案是42"},
+			{SessionID: "s9", Role: core.RoleAssistant, Text: "答案是42", Reasoning: "need search"},
 			{SessionID: "s9", Role: core.RoleUser, Text: "然后呢"},
 		},
 		[]core.Tool{fakeTool{"web_search"}},
@@ -298,18 +301,30 @@ func TestResponsesEchoesSearchCallsOnNextTurn(t *testing.T) {
 	if requests != 2 {
 		t.Fatalf("requests = %d, want 2", requests)
 	}
-	var foundEcho bool
-	for _, raw := range secondInput {
+	var searchIndex, reasoningIndex, latestUserIndex = -1, -1, -1
+	for i, raw := range secondInput {
 		item, ok := raw.(map[string]any)
 		if !ok {
 			continue
 		}
 		if item["type"] == "web_search_call" && item["id"] == "ws_9" {
-			foundEcho = true
+			searchIndex = i
+		}
+		if item["type"] == "reasoning" {
+			reasoningIndex = i
+		}
+		if item["role"] == "user" {
+			latestUserIndex = i
 		}
 	}
-	if !foundEcho {
+	if searchIndex < 0 {
 		t.Fatalf("second turn input does not echo web_search_call: %#v", secondInput)
+	}
+	if reasoningIndex < 0 || searchIndex != reasoningIndex+1 {
+		t.Fatalf("search call must immediately follow its reasoning: %#v", secondInput)
+	}
+	if latestUserIndex != len(secondInput)-1 {
+		t.Fatalf("latest user must remain the final input item: %#v", secondInput)
 	}
 }
 
@@ -593,15 +608,25 @@ func TestResponsesHistoryKeepsToolCallReasoning(t *testing.T) {
 	}
 }
 
-func TestResponsesInputItemsPlacesSearchCallsBeforeLatestUser(t *testing.T) {
+func TestResponsesInputItemsRestoresSearchCallsToOriginatingAssistant(t *testing.T) {
+	assistant := core.Message{
+		SessionID: "h2",
+		Role:      core.RoleAssistant,
+		Text:      "old answer",
+		Reasoning: "searched first",
+	}
 	history := []core.Message{
 		{SessionID: "h2", Role: core.RoleUser, Text: "old search"},
-		{SessionID: "h2", Role: core.RoleAssistant, Text: "old answer"},
+		assistant,
 		{SessionID: "h2", Role: core.RoleUser, Text: "new unrelated question"},
 	}
-	items := toResponsesInputItems(history, []map[string]any{{"type": "web_search_call", "id": "ws_1"}})
-	if len(items) != 4 {
-		t.Fatalf("items = %d, want 4: %#v", len(items), items)
+	replays := []webSearchCallReplay{{
+		assistantKey: responsesAssistantReplayKey(assistant.Text, assistant.Reasoning, nil),
+		items:        []map[string]any{{"type": "web_search_call", "id": "ws_1"}},
+	}}
+	items := toResponsesInputItems(history, replays)
+	if len(items) != 5 {
+		t.Fatalf("items = %d, want 5: %#v", len(items), items)
 	}
 	search := items[len(items)-2]
 	if search["type"] != "web_search_call" || search["id"] != "ws_1" {
@@ -614,6 +639,36 @@ func TestResponsesInputItemsPlacesSearchCallsBeforeLatestUser(t *testing.T) {
 	content := last["content"].([]map[string]any)
 	if got := content[0]["text"]; got != "new unrelated question" {
 		t.Fatalf("last user input = %#v, want new question", got)
+	}
+}
+
+func TestResponsesInputItemsKeepsSearchAndFunctionCallsInReasoningGroup(t *testing.T) {
+	assistant := core.Message{
+		SessionID: "mixed",
+		Role:      core.RoleAssistant,
+		Text:      "I searched and need to fetch details.",
+		Reasoning: "search before fetching",
+		ToolCalls: []core.ToolCall{{ID: "call_1", Name: "fetch", Input: `{"url":"https://example.com"}`}},
+	}
+	history := []core.Message{
+		{SessionID: "mixed", Role: core.RoleUser, Text: "research prices"},
+		assistant,
+		{SessionID: "mixed", Role: core.RoleTool, ToolResults: []core.ToolResult{{ToolCallID: "call_1", Name: "fetch", ModelText: "price details"}}},
+	}
+	replays := []webSearchCallReplay{{
+		assistantKey: responsesAssistantReplayKey(assistant.Text, assistant.Reasoning, assistant.ToolCalls),
+		items:        []map[string]any{{"type": "web_search_call", "id": "ws_mixed"}},
+	}}
+
+	items := toResponsesInputItems(history, replays)
+	wantTypes := []string{"message", "message", "reasoning", "web_search_call", "function_call", "function_call_output"}
+	if len(items) != len(wantTypes) {
+		t.Fatalf("items = %d, want %d: %#v", len(items), len(wantTypes), items)
+	}
+	for i, want := range wantTypes {
+		if got := items[i]["type"]; got != want {
+			t.Fatalf("item %d type = %#v, want %q; items=%#v", i, got, want, items)
+		}
 	}
 }
 
