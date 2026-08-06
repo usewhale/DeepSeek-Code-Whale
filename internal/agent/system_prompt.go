@@ -33,6 +33,7 @@ func (a *Agent) buildImmutableSystemBlocksWithTools(_ *core.ToolRegistry, opts .
 	systemBlocks = append(systemBlocks, "For questions about the current date or time, use an available read-only shell/time command to verify the answer instead of guessing from model memory.")
 	systemBlocks = append(systemBlocks, renderToolPolicyBlock())
 	systemBlocks = append(systemBlocks, "For branch decisions or key assumptions requiring user choice, call request_user_input instead of presenting long A/B/C prose menus.")
+	systemBlocks = append(systemBlocks, "Execute, don't narrate: never end a turn by announcing further work — do it now, in this turn, with tool calls. A turn ends only when the user explicitly asked for it (e.g. \"stop\", \"summarize\", \"hand off\"), the task is genuinely complete, or you need user input. Otherwise keep going automatically — planned-but-unexecuted next steps are a failure, not a completion.")
 	return systemBlocks
 }
 
