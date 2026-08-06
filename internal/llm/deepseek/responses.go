@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -673,20 +674,39 @@ func parseResponsesData(data, model, sessionID string, acc *responsesAccumulator
 			}
 			out <- llm.ProviderEvent{Type: llm.EventToolUseStart, ToolCall: &core.ToolCall{ID: st.id, Name: st.name}}
 		}
-	case "response.completed", "response.incomplete", "response.failed":
+	case "response.failed":
 		resp := frame.Response
 		if resp == nil {
 			return true, progressed, errors.New("responses stream ended without a response payload")
 		}
-		if resp.Status == "failed" {
-			// Terminal and non-retryable: the server reported a definitive
-			// failure; re-issuing the same request would fail again.
-			return true, progressed, &responsesTerminalError{msg: "deepseek responses request failed: " + responsesStatusDetail(resp)}
+		// Terminal and non-retryable: the server reported a definitive
+		// failure; re-issuing the same request would fail again.
+		return true, progressed, &responsesTerminalError{msg: "deepseek responses request failed: " + responsesStatusDetail(resp)}
+
+	case "response.incomplete":
+		// Server-side truncation. The payload is NOT authoritative: deltas may
+		// have streamed tool calls the truncated output omits, and the
+		// chat-completions path retries this class (errIncompleteStream).
+		// Mirror it — retryable stream error, never a clean end_turn with the
+		// accumulated calls dropped.
+		return false, progressed, errIncompleteStream
+
+	case "response.completed":
+		resp := frame.Response
+		if resp == nil {
+			return true, progressed, errors.New("responses stream ended without a response payload")
 		}
 		// The completed payload is the authoritative output: deltas may have
 		// been sparse or absent.
 		content := responsesOutputText(resp.Output)
 		calls := responsesFunctionCalls(resp.Output)
+		if len(calls) == 0 && len(acc.callsByIndex) > 0 {
+			// Sparse terminal payload: it omitted the function_call items the
+			// deltas already streamed. Keep the accumulated calls instead of
+			// dropping them (previously this emitted a clean end_turn with the
+			// planned tool call silently discarded).
+			calls = responsesAccumulatedCalls(acc.callsByIndex)
+		}
 		if content != "" {
 			acc.content.Reset()
 			acc.content.WriteString(content)
@@ -801,6 +821,28 @@ func responsesOutputText(output []map[string]any) string {
 // responsesFunctionCalls extracts function_call items from a completed
 // response's output list, normalizing tool names back to Whale's internal
 // names (mirrors the chat completions path).
+// responsesAccumulatedCalls converts the delta-accumulated call states back
+// to ToolCalls ordered by output index. Used when the terminal payload omits
+// the function_call items (sparse/truncated output) so delta-streamed calls
+// survive instead of being dropped.
+func responsesAccumulatedCalls(byIndex map[int]*responsesCallState) []core.ToolCall {
+	indices := make([]int, 0, len(byIndex))
+	for idx := range byIndex {
+		indices = append(indices, idx)
+	}
+	sort.Ints(indices)
+	calls := make([]core.ToolCall, 0, len(indices))
+	for _, idx := range indices {
+		st := byIndex[idx]
+		calls = append(calls, core.ToolCall{
+			ID:    st.id,
+			Name:  core.CanonicalToolName(st.name),
+			Input: st.arguments.String(),
+		})
+	}
+	return calls
+}
+
 func responsesFunctionCalls(output []map[string]any) []core.ToolCall {
 	var calls []core.ToolCall
 	for _, item := range output {

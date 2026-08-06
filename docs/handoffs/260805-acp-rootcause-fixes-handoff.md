@@ -130,3 +130,64 @@ The plan was copied into this worktree root as
 `docs/plans/`). It contains the full adversarial review, appendices
 (context-window derivation map, DeepSeek model slugs) and the review findings
 (threshold trap, mutating-loop blind spot, web_search compat) — all applied.
+
+---
+
+## Post-mortem addendum (2026-08-06): new failure after the fix landed
+
+The fix branch has since been merged and the worktree removed; the "22g geo
+import (fork)" session then failed AGAIN on the **new** binary (built from
+`local/integration`, which contains the merged root-cause fixes). Diagnosis:
+
+**Transport flip exposed an upstream bug, not a regression in our fix.**
+
+- The fix deleted the `deepseek-chat` hardcode, so the ACP session now
+  resolves `deepseek-v4-flash` → `responsesEnabled()` → **Responses API**
+  (`/responses`) for the first time (previously chat completions
+  `/chat/completions`).
+- The failure: turn ended `end_turn` with **0 tool calls** while the model's
+  persisted reasoning explicitly planned more calls ("Let me quickly view the
+  final handlers.rs sites … then commit"). 13 prior turns in the same session
+  were all `tool_use` — only the last dropped to `end_turn`.
+
+**Root cause (git blame → upstream `d6a699d0`, shayne-snap, PR #348):**
+`parseResponsesData` groups all three terminal frames together —
+`case "response.completed", "response.incomplete", "response.failed"`
+(responses.go:624) — and only `status == "failed"` is special-cased. A
+`response.incomplete` (server-side truncation) therefore falls through to the
+"authoritative payload" handler and emits a clean `end_turn`: no error, no
+retry, and the delta-streamed tool call in `acc.callsByIndex` is discarded
+because the terminal payload's `output` omits the `function_call` item
+(responses.go:635-646; `emitResponsesComplete` receives the empty `calls`).
+The chat-completions path retries incomplete streams via `errIncompleteStream`
+(client.go:652/690); the Responses path never did. No test covers
+`response.incomplete`.
+
+**Why it didn't bite the maintainers:** the ACP entrypoint previously
+hardcoded `deepseek-chat` → chat completions, so `parseResponsesData` never
+ran for ACP sessions. Our fix (removing the hardcode) is what turned the
+latent upstream bug on. The defect is upstream's; the fix ownership for PR-ING
+it is upstream, not this fork.
+
+**Fix (small, targeted — file upstream):**
+1. `responses.go:624` — split `response.incomplete` out of the shared case;
+   treat it as a retryable stream error (`streamError(errIncompleteStream, …)`)
+   mirroring the chat path, or a terminal error per `incomplete_details`.
+2. Merge guard: in `emitResponsesComplete`, if the terminal payload's `calls`
+   is empty but `acc.callsByIndex` accumulated calls from deltas, use the
+   accumulated calls instead of dropping them.
+3. Regression tests: `response.incomplete` fixture → assert retry/error, not
+   `end_turn`; fixture where deltas stream a tool call but the terminal output
+   omits it → assert the call survives.
+
+**FIXED (2026-08-06):** implemented per the above on `fix/acp-rootcause-fixes`
+(commit on top of the root-cause fixes):
+1. `response.incomplete` split out of the shared terminal case → retryable
+   `errIncompleteStream` (mirrors chat-completions path; never a clean end_turn).
+2. Sparse-terminal merge guard: when the completed payload omits the
+   `function_call` items but deltas streamed them, `responsesAccumulatedCalls`
+   keeps them.
+3. Regression tests: `TestResponsesIncompleteIsRetryableNotEndTurn` (retry,
+   not end_turn) and `TestResponsesSparseTerminalKeepsDeltaStreamedCalls`
+   (delta-streamed call survives). Still worth filing upstream
+   (shayne-snap/d6a699d0) so the upstream /responses path inherits the fix.

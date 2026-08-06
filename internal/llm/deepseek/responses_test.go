@@ -480,7 +480,9 @@ func TestResponsesModeRouting(t *testing.T) {
 }
 
 func TestResponsesFailedEvent(t *testing.T) {
+	var requests int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = fmt.Fprint(w, "data: {\"type\":\"response.failed\",\"sequence_number\":1,\"response\":{\"id\":\"r\",\"status\":\"failed\"}}\n\n")
 	}))
@@ -511,6 +513,9 @@ func TestResponsesFailedEvent(t *testing.T) {
 	}
 	if !strings.Contains(gotErr.Error(), "failed") {
 		t.Fatalf("error = %v", gotErr)
+	}
+	if requests != 1 {
+		t.Fatalf("requests = %d, want 1 (response.failed is terminal, not retried)", requests)
 	}
 }
 
@@ -949,5 +954,258 @@ func TestWithAPIAutoFallsBackToHeuristic(t *testing.T) {
 	c2 := newClientWithTransport(t, "deepseek-chat", WithAPI("auto"))
 	if c2.responsesEnabled() {
 		t.Fatal("auto + chat alias: expected chat completions (heuristic)")
+	}
+}
+
+// TestResponsesIncompleteIsRetryableNotEndTurn: a response.incomplete frame
+// (server-side truncation) must retry like the chat-completions path, never
+// emit a clean end_turn with the delta-streamed tool call dropped.
+func TestResponsesIncompleteIsRetryableNotEndTurn(t *testing.T) {
+	var requests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "text/event-stream")
+		if requests == 1 {
+			_, _ = fmt.Fprint(w, "data: {\"type\":\"response.incomplete\",\"sequence_number\":1,\"response\":{\"id\":\"r1\",\"status\":\"incomplete\",\"output\":[],\"incomplete_details\":{\"reason\":\"max_output_tokens\"},\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n")
+			return
+		}
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"response.output_item.added\",\"sequence_number\":2,\"output_index\":0,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"edit\",\"arguments\":\"\"}}\n\n")
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"response.function_call_arguments.delta\",\"sequence_number\":3,\"output_index\":0,\"delta\":\"{\\\"file_path\\\":\\\"a.go\\\"}\"}\n\n")
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"response.completed\",\"sequence_number\":4,\"response\":{\"id\":\"r2\",\"status\":\"completed\",\"output\":[{\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"edit\",\"arguments\":\"{\\\"file_path\\\":\\\"a.go\\\"}\"},{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n")
+	}))
+	defer srv.Close()
+
+	_ = os.Setenv("DEEPSEEK_API_KEY", "test-key")
+	c, err := New(
+		WithBaseURL(srv.URL),
+		WithHTTPClient(srv.Client()),
+		WithModel("deepseek-v4-flash"),
+		WithThinking(false),
+	)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	var complete *llm.ProviderResponse
+	var gotErr error
+	for ev := range c.StreamResponse(context.Background(),
+		[]core.Message{{SessionID: "s1", Role: core.RoleUser, Text: "edit a.go"}},
+		[]core.Tool{fakeTool{"edit"}},
+	) {
+		if ev.Type == llm.EventError {
+			gotErr = ev.Err
+		}
+		if ev.Type == llm.EventComplete {
+			complete = ev.Response
+		}
+	}
+	if gotErr != nil {
+		t.Fatalf("provider error: %v", gotErr)
+	}
+	if requests != 2 {
+		t.Fatalf("requests = %d, want 2 (response.incomplete must retry, not emit end_turn)", requests)
+	}
+	if complete == nil || complete.FinishReason != core.FinishReasonToolUse || len(complete.ToolCalls) != 1 {
+		t.Fatalf("expected ToolUse with 1 call after retry, got %+v", complete)
+	}
+}
+
+// TestResponsesSparseTerminalKeepsDeltaStreamedCalls: when the terminal
+// payload omits the function_call items but the deltas already streamed them,
+// the accumulated calls must survive instead of being dropped into a clean
+// end_turn.
+func TestResponsesSparseTerminalKeepsDeltaStreamedCalls(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"response.output_item.added\",\"sequence_number\":1,\"output_index\":0,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"edit\",\"arguments\":\"\"}}\n\n")
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"response.function_call_arguments.delta\",\"sequence_number\":2,\"output_index\":0,\"delta\":\"{\\\"file_path\\\":\\\"a.go\\\"\"}\n\n")
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"response.function_call_arguments.delta\",\"sequence_number\":3,\"output_index\":0,\"delta\":\",\\\"mode\\\":\\\"full\\\"}\"}\n\n")
+		// Terminal payload omits the function_call item entirely.
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"response.completed\",\"sequence_number\":4,\"response\":{\"id\":\"r1\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n")
+	}))
+	defer srv.Close()
+
+	_ = os.Setenv("DEEPSEEK_API_KEY", "test-key")
+	c, err := New(
+		WithBaseURL(srv.URL),
+		WithHTTPClient(srv.Client()),
+		WithModel("deepseek-v4-flash"),
+		WithThinking(false),
+	)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	var complete *llm.ProviderResponse
+	for ev := range c.StreamResponse(context.Background(),
+		[]core.Message{{SessionID: "s1", Role: core.RoleUser, Text: "edit a.go"}},
+		[]core.Tool{fakeTool{"edit"}},
+	) {
+		if ev.Type == llm.EventError {
+			t.Fatalf("provider error: %v", ev.Err)
+		}
+		if ev.Type == llm.EventComplete {
+			complete = ev.Response
+		}
+	}
+	if complete == nil || complete.FinishReason != core.FinishReasonToolUse || len(complete.ToolCalls) != 1 {
+		t.Fatalf("expected ToolUse with the delta-streamed call, got %+v", complete)
+	}
+	got := complete.ToolCalls[0]
+	if got.ID != "call_1" || got.Name != "edit" || got.Input != `{"file_path":"a.go","mode":"full"}` {
+		t.Fatalf("tool call = %+v, want call_1/edit with merged delta arguments", got)
+	}
+}
+
+// TestResponsesIncompleteExhaustsRetries: when the server keeps truncating,
+// the client must stop after streamMaxAttempts with an error — never an
+// infinite loop and never a clean end_turn — and each retry carries
+// StreamReset so the consumer drops partial deltas.
+func TestResponsesIncompleteExhaustsRetries(t *testing.T) {
+	var requests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"response.incomplete\",\"sequence_number\":1,\"response\":{\"id\":\"r1\",\"status\":\"incomplete\",\"output\":[],\"incomplete_details\":{\"reason\":\"max_output_tokens\"},\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n")
+	}))
+	defer srv.Close()
+
+	_ = os.Setenv("DEEPSEEK_API_KEY", "test-key")
+	c, err := New(
+		WithBaseURL(srv.URL),
+		WithHTTPClient(srv.Client()),
+		WithModel("deepseek-v4-flash"),
+		WithThinking(false),
+		WithStreamMaxAttempts(2),
+	)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	var gotErr error
+	var retryResets int
+	var endTurn bool
+	for ev := range c.StreamResponse(context.Background(),
+		[]core.Message{{SessionID: "s1", Role: core.RoleUser, Text: "hi"}},
+		nil,
+	) {
+		switch ev.Type {
+		case llm.EventError:
+			gotErr = ev.Err
+		case llm.EventRetryScheduled:
+			if ev.Retry != nil && ev.Retry.StreamReset {
+				retryResets++
+			}
+		case llm.EventComplete:
+			if ev.Response != nil && ev.Response.FinishReason == core.FinishReasonEndTurn {
+				endTurn = true
+			}
+		}
+	}
+	if gotErr == nil {
+		t.Fatal("expected error after retries exhausted, not a clean end_turn")
+	}
+	if endTurn {
+		t.Fatal("incomplete must never produce a clean end_turn")
+	}
+	if requests != 2 {
+		t.Fatalf("requests = %d, want 2 (streamMaxAttempts)", requests)
+	}
+	if retryResets != 1 {
+		t.Fatalf("StreamReset retry events = %d, want 1", retryResets)
+	}
+}
+
+// TestResponsesIncompleteAfterProgressNotRetried: once deltas have streamed
+// (progress), an incomplete is surfaced as an error, not retried — parity with
+// the chat-completions path (partial output already delivered; StreamReset
+// would only be safe for pre-progress truncation).
+func TestResponsesIncompleteAfterProgressNotRetried(t *testing.T) {
+	var requests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"response.output_text.delta\",\"sequence_number\":1,\"delta\":\"partial\"}\n\n")
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"response.incomplete\",\"sequence_number\":2,\"response\":{\"id\":\"r1\",\"status\":\"incomplete\",\"output\":[],\"incomplete_details\":{\"reason\":\"max_output_tokens\"},\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n")
+	}))
+	defer srv.Close()
+
+	_ = os.Setenv("DEEPSEEK_API_KEY", "test-key")
+	c, err := New(
+		WithBaseURL(srv.URL),
+		WithHTTPClient(srv.Client()),
+		WithModel("deepseek-v4-flash"),
+		WithThinking(false),
+	)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	var gotErr error
+	var complete *llm.ProviderResponse
+	for ev := range c.StreamResponse(context.Background(),
+		[]core.Message{{SessionID: "s1", Role: core.RoleUser, Text: "hi"}},
+		nil,
+	) {
+		if ev.Type == llm.EventError {
+			gotErr = ev.Err
+		}
+		if ev.Type == llm.EventComplete {
+			complete = ev.Response
+		}
+	}
+	if gotErr == nil {
+		t.Fatal("expected error (incomplete after progress is not retried)")
+	}
+	if complete != nil && complete.FinishReason == core.FinishReasonEndTurn {
+		t.Fatal("must not emit a clean end_turn from a post-progress incomplete")
+	}
+	if requests != 1 {
+		t.Fatalf("requests = %d, want 1 (no retry after progress)", requests)
+	}
+}
+
+// TestResponsesSparseTerminalPreservesCallOrder: multiple delta-streamed
+// calls with non-contiguous indices survive in output-index order.
+func TestResponsesSparseTerminalPreservesCallOrder(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		for _, idx := range []int{0, 2} {
+			_, _ = fmt.Fprintf(w, "data: {\"type\":\"response.output_item.added\",\"sequence_number\":%d,\"output_index\":%d,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_%d\",\"name\":\"edit\",\"arguments\":\"\"}}\n\n", idx+1, idx, idx)
+		}
+		_, _ = fmt.Fprintf(w, "data: {\"type\":\"response.function_call_arguments.delta\",\"sequence_number\":4,\"output_index\":0,\"delta\":\"{\\\"a\\\":1}\"}\n\n")
+		_, _ = fmt.Fprintf(w, "data: {\"type\":\"response.function_call_arguments.delta\",\"sequence_number\":5,\"output_index\":2,\"delta\":\"{\\\"b\\\":2}\"}\n\n")
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"response.completed\",\"sequence_number\":6,\"response\":{\"id\":\"r1\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n")
+	}))
+	defer srv.Close()
+
+	_ = os.Setenv("DEEPSEEK_API_KEY", "test-key")
+	c, err := New(
+		WithBaseURL(srv.URL),
+		WithHTTPClient(srv.Client()),
+		WithModel("deepseek-v4-flash"),
+		WithThinking(false),
+	)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	var complete *llm.ProviderResponse
+	for ev := range c.StreamResponse(context.Background(),
+		[]core.Message{{SessionID: "s1", Role: core.RoleUser, Text: "edit"}},
+		[]core.Tool{fakeTool{"edit"}},
+	) {
+		if ev.Type == llm.EventError {
+			t.Fatalf("provider error: %v", ev.Err)
+		}
+		if ev.Type == llm.EventComplete {
+			complete = ev.Response
+		}
+	}
+	if complete == nil || complete.FinishReason != core.FinishReasonToolUse || len(complete.ToolCalls) != 2 {
+		t.Fatalf("expected 2 ToolUse calls, got %+v", complete)
+	}
+	if complete.ToolCalls[0].ID != "call_0" || complete.ToolCalls[1].ID != "call_2" {
+		t.Fatalf("calls out of output-index order: %+v", complete.ToolCalls)
 	}
 }
