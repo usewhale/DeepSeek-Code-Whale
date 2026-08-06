@@ -1,10 +1,12 @@
 package acp
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -15,6 +17,7 @@ import (
 
 	"github.com/usewhale/whale/internal/agent"
 	"github.com/usewhale/whale/internal/core"
+	"github.com/usewhale/whale/internal/policy"
 	"github.com/usewhale/whale/internal/store"
 )
 
@@ -1498,4 +1501,403 @@ func TestSessionDeleteIgnoresMetaField(t *testing.T) {
 		t.Fatalf("delete with _meta errored: %v", rpcErr)
 	}
 	assertSessionArtifactsGone(t, dir, "sess-1")
+}
+
+// ---------------------------------------------------------------------------
+// Permission option kinds — schema-valid regression tests
+// ---------------------------------------------------------------------------
+//
+// The ACP schema (agent-client-protocol-schema v1/client.rs and v2/client.rs)
+// defines exactly four PermissionOptionKind values:
+// allow_once | allow_always | reject_once | reject_always. A client like Zed
+// deserializes the request_permission payload with a strict serde enum, so any
+// other string (e.g. "allow_tool"/"allow_server") fails at deserialization and
+// the approval is silently denied.
+
+// runApprovalFunc drives NewACPApprovalFunc against a pipe transport, captures the
+// outbound session/request_permission payload, hands the request id + pending
+// response channel to respond (which must deliver or close a response), and
+// returns the payload and the resulting policy decision.
+func runApprovalFunc(t *testing.T, toolName string, respond func(t *testing.T, numID int64, ch chan json.RawMessage)) (RequestPermissionRequest, policy.ApprovalDecision) {
+	t.Helper()
+	pr, pw := io.Pipe()
+	defer pr.Close()
+	defer pw.Close()
+
+	transport := NewTransportWithIO(strings.NewReader(""), pw, io.Discard)
+	approvalFn := NewACPApprovalFunc(transport)
+
+	done := make(chan policy.ApprovalDecision, 1)
+	go func() {
+		done <- approvalFn(policy.ApprovalRequest{
+			SessionID: "sess-1",
+			ToolCall:  core.ToolCall{ID: "tc-1", Name: toolName, Input: `{"command":"ls"}`},
+		})
+	}()
+
+	scanner := bufio.NewScanner(pr)
+	if !scanner.Scan() {
+		t.Fatalf("no request_permission call written: %v", scanner.Err())
+	}
+	var rpcReq RPCRequest
+	if err := json.Unmarshal(scanner.Bytes(), &rpcReq); err != nil {
+		t.Fatalf("parse outbound request: %v", err)
+	}
+	var permReq RequestPermissionRequest
+	if err := json.Unmarshal(rpcReq.Params, &permReq); err != nil {
+		t.Fatalf("parse outbound params: %v", err)
+	}
+	numID, ok := rpcReq.ID.Value.(float64)
+	if !ok {
+		t.Fatalf("request id is %T (%v), want float64", rpcReq.ID.Value, rpcReq.ID.Value)
+	}
+	transport.pendingMu.Lock()
+	ch, ok := transport.pending[int64(numID)]
+	transport.pendingMu.Unlock()
+	if !ok {
+		t.Fatalf("no pending channel for id %d", int64(numID))
+	}
+
+	respond(t, int64(numID), ch)
+
+	select {
+	case got := <-done:
+		return permReq, got
+	case <-time.After(5 * time.Second):
+		t.Fatal("approval func did not return")
+		return permReq, policy.ApprovalDeny
+	}
+}
+
+// capturePermissionRequest runs NewACPApprovalFunc against a pipe transport and
+// returns the outbound session/request_permission payload, answering the call
+// with a v1-nested "selected once" result so the func completes.
+func capturePermissionRequest(t *testing.T, toolName string) RequestPermissionRequest {
+	t.Helper()
+	permReq, _ := runApprovalFunc(t, toolName, func(t *testing.T, numID int64, ch chan json.RawMessage) {
+		t.Helper()
+		raw, err := json.Marshal(RPCResponse{
+			JSONRPC: "2.0",
+			ID:      &RequestID{Value: numID},
+			Result:  json.RawMessage(`{"outcome":{"outcome":"selected","optionId":"once"}}`),
+		})
+		if err != nil {
+			t.Fatalf("marshal response: %v", err)
+		}
+		ch <- raw
+	})
+	return permReq
+}
+
+// TestPermissionOptionKindsAreSchemaValid serializes the actual
+// request_permission payload the approval func sends for every tool kind
+// Whale can be asked about, and asserts every option kind is one of the four
+// schema-defined values. Regression test for the live bug where MCP options
+// carried "allow_tool"/"allow_server" and Zed's strict serde rejected the
+// request, silently denying every MCP approval.
+func TestPermissionOptionKindsAreSchemaValid(t *testing.T) {
+	schemaKinds := map[PermissionOptionKind]bool{
+		KindAllowOnce: true, KindAllowAlways: true, KindRejectOnce: true, KindRejectAlways: true,
+	}
+
+	toolNames := []string{
+		"shell_run", "edit", "web_fetch", "update_plan",
+		"mcp__codemap__find_file", "mcp__server__tool", "mcp__", "",
+	}
+	for _, name := range toolNames {
+		t.Run(name, func(t *testing.T) {
+			permReq := capturePermissionRequest(t, name)
+			if len(permReq.Options) == 0 {
+				t.Fatal("no options sent")
+			}
+			for i, opt := range permReq.Options {
+				if !schemaKinds[opt.Kind] {
+					t.Errorf("option %d (%q) has kind %q — not a schema-valid PermissionOptionKind", i, opt.OptionID, opt.Kind)
+				}
+				if !opt.Kind.Valid() {
+					t.Errorf("option %d (%q): Kind.Valid()=false for %q", i, opt.OptionID, opt.Kind)
+				}
+			}
+		})
+	}
+
+	// The wire value of every schema-valid kind must round-trip exactly.
+	for _, kind := range []PermissionOptionKind{KindAllowOnce, KindAllowAlways, KindRejectOnce, KindRejectAlways} {
+		if b, err := json.Marshal(kind); err != nil || string(b) != `"`+string(kind)+`"` {
+			t.Errorf("kind %q marshals to %s (err %v)", kind, b, err)
+		}
+	}
+}
+
+// strictPermissionOptionKind mimics the ACP schema's strict serde enum
+// deserialization (v1/client.rs PermissionOptionKind): any value outside
+// {allow_once, allow_always, reject_once, reject_always} is rejected.
+type strictPermissionOptionKind string
+
+func decodeStrictKind(raw string) (strictPermissionOptionKind, error) {
+	switch raw {
+	case "allow_once", "allow_always", "reject_once", "reject_always":
+		return strictPermissionOptionKind(raw), nil
+	default:
+		return "", fmt.Errorf("unknown variant `%s`, expected one of `allow_once`, `allow_always`, `reject_once`, `reject_always`", raw)
+	}
+}
+
+// TestPermissionOptionsDeserializeOnStrictSchemaDecoder cross-checks that every
+// kind the approval func sends round-trips through a strict decoder that
+// rejects unknown variants exactly like the ACP schema enum used by Zed — and
+// that the decoder still rejects the kinds that caused the live bug.
+func TestPermissionOptionsDeserializeOnStrictSchemaDecoder(t *testing.T) {
+	for _, name := range []string{"shell_run", "mcp__codemap__find_file", "mcp__a__b"} {
+		permReq := capturePermissionRequest(t, name)
+		for _, opt := range permReq.Options {
+			if _, err := decodeStrictKind(string(opt.Kind)); err != nil {
+				t.Errorf("option %q for %q: %v", opt.OptionID, name, err)
+			}
+		}
+	}
+	for _, bad := range []string{"allow_tool", "allow_server", "", "ALLOW_ONCE"} {
+		if _, err := decodeStrictKind(bad); err == nil {
+			t.Errorf("strict decoder accepted invalid kind %q", bad)
+		}
+	}
+}
+
+// TestPermissionOptionKindValid covers the Valid() guard itself.
+func TestPermissionOptionKindValid(t *testing.T) {
+	for _, kind := range []PermissionOptionKind{KindAllowOnce, KindAllowAlways, KindRejectOnce, KindRejectAlways} {
+		if !kind.Valid() {
+			t.Errorf("Valid(%q) = false, want true", kind)
+		}
+	}
+	for _, kind := range []PermissionOptionKind{"allow_tool", "allow_server", "", "ALLOW_ONCE", "allow_once\n", "allow-once"} {
+		if kind.Valid() {
+			t.Errorf("Valid(%q) = true, want false", kind)
+		}
+	}
+}
+
+// TestInvalidPermissionOptionKind covers the send-path guard helper: an option
+// carrying a non-schema kind is reported, so NewACPApprovalFunc can deny loudly
+// instead of sending a payload the ACP client would reject at deserialization
+// (the original silent-denial bug).
+func TestInvalidPermissionOptionKind(t *testing.T) {
+	if bad, ok := invalidPermissionOptionKind([]PermissionOption{
+		{OptionID: "once", Kind: KindAllowOnce},
+		{OptionID: "tool", Kind: "allow_tool"},
+	}); !ok || bad != "allow_tool" {
+		t.Errorf("invalidPermissionOptionKind = (%q, %v), want (\"allow_tool\", true)", bad, ok)
+	}
+	if bad, ok := invalidPermissionOptionKind([]PermissionOption{
+		{OptionID: "once", Kind: KindAllowOnce},
+		{OptionID: "server", Kind: "allow_server"},
+	}); !ok || bad != "allow_server" {
+		t.Errorf("invalidPermissionOptionKind = (%q, %v), want (\"allow_server\", true)", bad, ok)
+	}
+	if bad, ok := invalidPermissionOptionKind(nil); ok || bad != "" {
+		t.Errorf("invalidPermissionOptionKind(nil) = (%q, %v), want (\"\", false)", bad, ok)
+	}
+	if bad, ok := invalidPermissionOptionKind([]PermissionOption{
+		{OptionID: "once", Kind: KindAllowOnce},
+		{OptionID: "always", Kind: KindAllowAlways},
+		{OptionID: "reject", Kind: KindRejectOnce},
+	}); ok {
+		t.Errorf("invalidPermissionOptionKind(valid) = (%q, true), want false", bad)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Approval decision mapping — related codepath of the changed option kinds
+// ---------------------------------------------------------------------------
+// The options sent by NewACPApprovalFunc (typed kinds) flow into the response
+// parse + decision switch. Cover every branch of that downstream codepath.
+
+// approvalDecisionWithResult runs NewACPApprovalFunc against a pipe transport
+// whose session/request_permission call is answered with the given raw result
+// payload, returning the policy decision.
+func approvalDecisionWithResult(t *testing.T, result string) policy.ApprovalDecision {
+	t.Helper()
+	_, dec := runApprovalFunc(t, "shell_run", func(t *testing.T, numID int64, ch chan json.RawMessage) {
+		t.Helper()
+		raw, err := json.Marshal(RPCResponse{
+			JSONRPC: "2.0",
+			ID:      &RequestID{Value: numID},
+			Result:  json.RawMessage(result),
+		})
+		if err != nil {
+			t.Fatalf("marshal response: %v", err)
+		}
+		ch <- raw
+	})
+	return dec
+}
+
+// TestApprovalDecisionMapping covers every optionId the approval func can
+// receive from the client, plus cancelled, unknown outcome, and malformed
+// result — the downstream of the typed option kinds.
+func TestApprovalDecisionMapping(t *testing.T) {
+	cases := []struct {
+		name   string
+		result string
+		want   policy.ApprovalDecision
+	}{
+		{name: "selected once", result: `{"outcome":{"outcome":"selected","optionId":"once"}}`, want: policy.ApprovalAllow},
+		{name: "selected always", result: `{"outcome":{"outcome":"selected","optionId":"always"}}`, want: policy.ApprovalAllowForSession},
+		{name: "selected reject", result: `{"outcome":{"outcome":"selected","optionId":"reject"}}`, want: policy.ApprovalDeny},
+		{name: "selected unknown option", result: `{"outcome":{"outcome":"selected","optionId":"bogus"}}`, want: policy.ApprovalDeny},
+		{name: "selected missing option", result: `{"outcome":{"outcome":"selected"}}`, want: policy.ApprovalDeny},
+		{name: "cancelled", result: `{"outcome":{"outcome":"cancelled"}}`, want: policy.ApprovalCancel},
+		{name: "unknown outcome", result: `{"outcome":{"outcome":"maybe"}}`, want: policy.ApprovalDeny},
+		{name: "malformed result", result: `{"outcome":42}`, want: policy.ApprovalDeny},
+		{name: "non-object result", result: `"hello"`, want: policy.ApprovalDeny},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := approvalDecisionWithResult(t, c.result); got != c.want {
+				t.Errorf("decision = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
+// TestApprovalFuncErrorEnvelope verifies that a JSON-RPC error response (no
+// result payload) denies rather than panics or grants.
+func TestApprovalFuncErrorEnvelope(t *testing.T) {
+	got := approvalDecisionWithResponder(t, func(t *testing.T, numID int64, ch chan json.RawMessage) {
+		raw, err := json.Marshal(RPCErrorResponse{
+			JSONRPC: "2.0",
+			ID:      &RequestID{Value: numID},
+			Error:   &RPCErr{Code: -32601, Message: "method not found"},
+		})
+		if err != nil {
+			t.Fatalf("marshal error response: %v", err)
+		}
+		ch <- raw
+	})
+	if got != policy.ApprovalDeny {
+		t.Errorf("error envelope decision = %v, want %v", got, policy.ApprovalDeny)
+	}
+}
+
+// TestApprovalFuncTransportClosed verifies that a transport close while
+// waiting for the permission response denies the approval.
+func TestApprovalFuncTransportClosed(t *testing.T) {
+	got := approvalDecisionWithResponder(t, func(t *testing.T, numID int64, ch chan json.RawMessage) {
+		close(ch)
+	})
+	if got != policy.ApprovalDeny {
+		t.Errorf("closed transport decision = %v, want %v", got, policy.ApprovalDeny)
+	}
+}
+
+// approvalDecisionWithResponder runs NewACPApprovalFunc against a pipe
+// transport whose session/request_permission call is answered by the responder,
+// which receives the outbound request id and its pending response channel and
+// must deliver (or close) a response.
+func approvalDecisionWithResponder(t *testing.T, respond func(t *testing.T, numID int64, ch chan json.RawMessage)) policy.ApprovalDecision {
+	t.Helper()
+	_, dec := runApprovalFunc(t, "shell_run", respond)
+	return dec
+}
+
+// TestApprovalFuncConcurrentSessions verifies the shared approval func and
+// transport handle many concurrent request_permission calls: each session gets
+// a distinct request id, its own pending channel, and the correct decision —
+// no cross-talk, no deadlock, no data race (run with -race).
+func TestApprovalFuncConcurrentSessions(t *testing.T) {
+	const n = 32
+	pr, pw := io.Pipe()
+	defer pr.Close()
+	defer pw.Close()
+
+	transport := NewTransportWithIO(strings.NewReader(""), pw, io.Discard)
+	approvalFn := NewACPApprovalFunc(transport)
+
+	type result struct {
+		idx int
+		dec policy.ApprovalDecision
+	}
+	results := make(chan result, n)
+	start := make(chan struct{})
+	for i := 0; i < n; i++ {
+		go func(idx int) {
+			<-start
+			req := policy.ApprovalRequest{
+				SessionID: fmt.Sprintf("sess-%d", idx),
+				ToolCall:  core.ToolCall{ID: fmt.Sprintf("tc-%d", idx), Name: "shell_run", Input: `{"command":"ls"}`},
+			}
+			results <- result{idx, approvalFn(req)}
+		}(i)
+	}
+	close(start)
+
+	scanner := bufio.NewScanner(pr)
+	seen := make(map[int]bool, n)
+	for i := 0; i < n; i++ {
+		if !scanner.Scan() {
+			t.Fatalf("only %d/%d request_permission calls written: %v", i, n, scanner.Err())
+		}
+		var rpcReq RPCRequest
+		if err := json.Unmarshal(scanner.Bytes(), &rpcReq); err != nil {
+			t.Fatalf("parse outbound request %d: %v", i, err)
+		}
+		var permReq RequestPermissionRequest
+		if err := json.Unmarshal(rpcReq.Params, &permReq); err != nil {
+			t.Fatalf("parse outbound params %d: %v", i, err)
+		}
+		var idx int
+		if _, err := fmt.Sscanf(permReq.ToolCall.ToolCallID, "tc-%d", &idx); err != nil {
+			t.Fatalf("unexpected toolCallId %q: %v", permReq.ToolCall.ToolCallID, err)
+		}
+		if seen[idx] {
+			t.Fatalf("duplicate request for session %d", idx)
+		}
+		seen[idx] = true
+
+		numID, ok := rpcReq.ID.Value.(float64)
+		if !ok {
+			t.Fatalf("request id is %T (%v), want float64", rpcReq.ID.Value, rpcReq.ID.Value)
+		}
+		id := int64(numID)
+		transport.pendingMu.Lock()
+		ch, ok := transport.pending[id]
+		transport.pendingMu.Unlock()
+		if !ok {
+			t.Fatalf("no pending channel for id %d", id)
+		}
+		resultPayload := `{"outcome":{"outcome":"selected","optionId":"once"}}`
+		if idx%2 == 1 {
+			resultPayload = `{"outcome":{"outcome":"selected","optionId":"always"}}`
+		}
+		raw, err := json.Marshal(RPCResponse{
+			JSONRPC: "2.0",
+			ID:      &RequestID{Value: numID},
+			Result:  json.RawMessage(resultPayload),
+		})
+		if err != nil {
+			t.Fatalf("marshal response: %v", err)
+		}
+		ch <- raw
+	}
+
+	for i := 0; i < n; i++ {
+		r := <-results
+		want := policy.ApprovalAllow
+		if r.idx%2 == 1 {
+			want = policy.ApprovalAllowForSession
+		}
+		if r.dec != want {
+			t.Errorf("session %d: decision = %v, want %v", r.idx, r.dec, want)
+		}
+	}
+}
+
+// TestPermissionOptionKindString covers the String() rendering of the typed
+// kind, used in the send-path guard's log message.
+func TestPermissionOptionKindString(t *testing.T) {
+	for _, kind := range []PermissionOptionKind{KindAllowOnce, KindAllowAlways, KindRejectOnce, KindRejectAlways} {
+		if got := kind.String(); got != string(kind) {
+			t.Errorf("String(%q) = %q, want %q", kind, got, string(kind))
+		}
+	}
 }
