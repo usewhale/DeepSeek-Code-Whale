@@ -477,14 +477,25 @@ func (h *Handler) handleSessionLoad(req *RPCRequest) *RPCErrorResponse {
 // a single response is returned with no nextCursor.
 func (h *Handler) handleSessionList(req *RPCRequest) *RPCErrorResponse {
 	var params ListSessionsRequest
-	if err := json.Unmarshal(req.Params, &params); err != nil {
-		return NewErrorResponse(req.ID, ErrCodeInvalidParams, fmt.Sprintf("invalid params: %v", err))
+	// Params are optional ({}): a client that omits the params object sends
+	// nil, which json.Unmarshal would reject.
+	if len(req.Params) > 0 {
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			return NewErrorResponse(req.ID, ErrCodeInvalidParams, fmt.Sprintf("invalid params: %v", err))
+		}
 	}
 	sessionsDir := h.metaDir
 	if sessionsDir == "" {
 		return NewErrorResponse(req.ID, ErrCodeInternal, "session store not configured")
 	}
+	// Normalize the filter: the stored cwd is what the client sent on
+	// session/new (verbatim), so a trailing slash or symlinked spelling would
+	// otherwise silently miss. filepath.Clean makes "/work/" and "/work" agree
+	// without touching how cwd is stored.
 	filterCwd := strings.TrimSpace(params.Cwd)
+	if filterCwd != "" {
+		filterCwd = filepath.Clean(filterCwd)
+	}
 
 	entries, err := os.ReadDir(sessionsDir)
 	if err != nil {
@@ -495,9 +506,9 @@ func (h *Handler) handleSessionList(req *RPCRequest) *RPCErrorResponse {
 		return NewErrorResponse(req.ID, ErrCodeInternal, fmt.Sprintf("failed to list sessions: %v", err))
 	}
 	type candidate struct {
-		id      string
-		cwd     string
-		modTime time.Time
+		id         string
+		cwd        string
+		lastActive time.Time
 	}
 	var cands []candidate
 	for _, e := range entries {
@@ -505,13 +516,15 @@ func (h *Handler) handleSessionList(req *RPCRequest) *RPCErrorResponse {
 			continue
 		}
 		id := strings.TrimSuffix(e.Name(), ".jsonl")
-		if id == "" || strings.Contains(id, "--subagent-") || strings.HasPrefix(id, "subagent-") {
+		if id == "" || session.IsSubagentSessionID(id) {
 			continue
 		}
 		meta, _ := h.loadSessionMeta(id)
-		cwd := meta.Cwd
+		cwd := strings.TrimSpace(meta.Cwd)
 		if cwd == "" {
 			cwd = h.defaultCwd
+		} else {
+			cwd = filepath.Clean(cwd)
 		}
 		if filterCwd != "" && cwd != filterCwd {
 			continue
@@ -520,9 +533,24 @@ func (h *Handler) handleSessionList(req *RPCRequest) *RPCErrorResponse {
 		if err != nil {
 			continue
 		}
-		cands = append(cands, candidate{id: id, cwd: cwd, modTime: info.ModTime()})
+		// UpdatedAt is the last message's persisted timestamp (backward tail
+		// read): it is the true last-activity time and survives file rewrites —
+		// compaction and session forking rewrite the .jsonl via tmp+rename,
+		// which would otherwise bump a pure mtime proxy. Falls back to the
+		// file mtime when the tail is empty or unparseable.
+		lastActive := info.ModTime()
+		if t, ok := session.LastMessageUpdatedAt(sessionsDir, id); ok {
+			lastActive = t
+		}
+		cands = append(cands, candidate{id: id, cwd: cwd, lastActive: lastActive})
 	}
-	sort.Slice(cands, func(i, j int) bool { return cands[i].modTime.After(cands[j].modTime) })
+	sort.Slice(cands, func(i, j int) bool {
+		if !cands[i].lastActive.Equal(cands[j].lastActive) {
+			return cands[i].lastActive.After(cands[j].lastActive)
+		}
+		// Deterministic tie-break for equal timestamps (unstable sort).
+		return cands[i].id < cands[j].id
+	})
 
 	out := make([]SessionInfo, 0, len(cands))
 	for _, c := range cands {
@@ -534,7 +562,7 @@ func (h *Handler) handleSessionList(req *RPCRequest) *RPCErrorResponse {
 			SessionID: c.id,
 			Cwd:       c.cwd,
 			Title:     title,
-			UpdatedAt: c.modTime.UTC().Format(time.RFC3339),
+			UpdatedAt: c.lastActive.UTC().Format(time.RFC3339),
 		})
 	}
 	h.transport.SendResponse(NewSuccessResponse(req.ID, ListSessionsResponse{Sessions: out}))
