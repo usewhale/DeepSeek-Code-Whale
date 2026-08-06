@@ -48,6 +48,7 @@ const (
 	AgentEventTypeProviderRetryScheduled AgentEventType = "provider_retry_scheduled"
 	AgentEventTypeResponseReset          AgentEventType = "response_reset"
 	AgentEventTypeLeakedToolCallScrubbed AgentEventType = "leaked_tool_call_scrubbed"
+	AgentEventTypePrematureEndRecovered  AgentEventType = "premature_end_recovered"
 	AgentEventTypeToolRecoveryScheduled  AgentEventType = "tool_recovery_scheduled"
 	AgentEventTypeToolRecoveryAttempt    AgentEventType = "tool_recovery_attempt"
 	AgentEventTypeToolRecoveryExhausted  AgentEventType = "tool_recovery_exhausted"
