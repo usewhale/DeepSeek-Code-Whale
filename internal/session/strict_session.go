@@ -27,7 +27,7 @@ func ResolveStrictSession(sessionsDir, rawID string) (StrictSession, error) {
 	if core.SanitizeSessionID(trimmed) != trimmed {
 		return StrictSession{}, fmt.Errorf("invalid session id %q: unsupported characters", trimmed)
 	}
-	if isSubagentSessionID(trimmed) {
+	if IsSubagentSessionID(trimmed) {
 		return StrictSession{}, fmt.Errorf("session %q is a subagent session and cannot be resumed directly", trimmed)
 	}
 	path := filepath.Join(sessionsDir, trimmed+".jsonl")
