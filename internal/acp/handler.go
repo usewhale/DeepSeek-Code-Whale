@@ -93,11 +93,17 @@ func (h *Handler) evictIfOverLimit() *SessionRuntime {
 	var oldestID string
 	var oldest time.Time
 	for id, sctx := range h.sessions {
+		// Never evict a session with an in-flight prompt: closing its runtime
+		// (e.g. MCP servers) mid-turn would break that turn's tool calls.
+		if len(sctx.runs) > 0 {
+			continue
+		}
 		if oldestID == "" || sctx.lastUsed.Before(oldest) {
 			oldestID, oldest = id, sctx.lastUsed
 		}
 	}
 	if oldestID == "" {
+		Logger.Printf("session cap %d exceeded but all live sessions are busy; skipping eviction", maxLiveSessions)
 		return nil
 	}
 	rt := h.sessions[oldestID].runtime
@@ -138,11 +144,20 @@ func (h *Handler) CloseSessions() {
 		}
 	}
 	h.mu.Unlock()
+	// Close in parallel: an MCP stdio close can take up to ~5s per session
+	// (grace + hard limit), so sequential teardown would stall shutdown.
+	var wg sync.WaitGroup
 	for _, rt := range sessions {
-		if rt.Close != nil {
-			rt.Close()
+		if rt.Close == nil {
+			continue
 		}
+		wg.Add(1)
+		go func(closeFn func()) {
+			defer wg.Done()
+			closeFn()
+		}(rt.Close)
 	}
+	wg.Wait()
 }
 
 // SetSessionsDir sets the directory used to persist per-session metadata
@@ -343,8 +358,12 @@ func (h *Handler) handleSessionNew(req *RPCRequest) *RPCErrorResponse {
 	h.mu.Lock()
 	h.sessions[whaleSessionID] = &sessionContext{whaleSessionID: whaleSessionID, runtime: rt, cwd: cwd, mode: session.ModeAgent, lastUsed: time.Now()}
 	h.mu.Unlock()
+	// Close the evicted runtime off the session/new critical path: an MCP
+	// stdio close can take up to ~5s, which would otherwise stall session
+	// creation. Safe because eviction never targets sessions with active
+	// prompts, so nothing references the evicted runtime afterwards.
 	if evicted := h.evictIfOverLimit(); evicted != nil && evicted.Close != nil {
-		evicted.Close()
+		go evicted.Close()
 	}
 	h.saveSessionMeta(whaleSessionID, sessionMeta{Cwd: cwd, Mode: session.ModeAgent})
 	Logger.Printf("new session: acp=%s cwd=%s", whaleSessionID, cwd)
@@ -411,7 +430,7 @@ func (h *Handler) handleSessionLoad(req *RPCRequest) *RPCErrorResponse {
 		}
 		h.mu.Unlock()
 		if evicted := h.evictIfOverLimit(); evicted != nil && evicted.Close != nil {
-			evicted.Close()
+			go evicted.Close()
 		}
 		// Persist the resolved cwd/mode so a subsequent load (or a restart where
 		// the sidecar was never written) stays consistent with the runtime we
