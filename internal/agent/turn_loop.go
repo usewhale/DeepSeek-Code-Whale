@@ -214,7 +214,9 @@ func (a *Agent) runStreamWithNewMessages(ctx context.Context, sessionID string, 
 			assistant, toolMsg, usage, modelName, cacheShape, abortTurn, attemptedToolCalls, sErr := a.streamAndHandle(ctx, sessionID, history, rt, out, turnPolicy, toolSnapshot, remainingToolCalls, autoDenyCounts, opts)
 			if sErr != nil {
 				if errors.Is(sErr, context.Canceled) {
-					a.persistInterruptedTurnMarker(sessionID)
+					if !isServiceShutdown(ctx) {
+						a.persistInterruptedTurnMarker(sessionID)
+					}
 					emit(AgentEvent{Type: AgentEventTypeTurnCancelled, Content: "turn cancelled"})
 					return
 				}
@@ -245,7 +247,9 @@ func (a *Agent) runStreamWithNewMessages(ctx context.Context, sessionID string, 
 				}
 				if ctx.Err() != nil {
 					if errors.Is(ctx.Err(), context.Canceled) {
-						a.persistInterruptedTurnMarker(sessionID)
+						if !isServiceShutdown(ctx) {
+							a.persistInterruptedTurnMarker(sessionID)
+						}
 						return
 					}
 					// Deadline expiry is a timeout, not a user interrupt:
@@ -452,4 +456,8 @@ func (a *Agent) runStreamWithNewMessages(ctx context.Context, sessionID string, 
 	}()
 
 	return out, nil
+}
+
+func isServiceShutdown(ctx context.Context) bool {
+	return errors.Is(context.Cause(ctx), ErrServiceShutdown)
 }
