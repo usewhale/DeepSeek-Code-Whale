@@ -126,6 +126,7 @@ func (a *Agent) runStreamWithNewMessages(ctx context.Context, sessionID string, 
 		wrapUpNudged := false
 		planLoopNudges := 0
 		leakedToolCallNudges := 0
+		prematureEndTurnNudges := 0
 		consecutiveStormRounds := 0
 		consecutiveRedundantRounds := 0
 		progress := &progressTracker{}
@@ -437,6 +438,34 @@ func (a *Agent) runStreamWithNewMessages(ctx context.Context, sessionID string, 
 				// cleaned. A response reset tells them to drop it; the recovered turn
 				// re-streams the real answer next iteration. Mirrors the pending-input
 				// reset above.
+				if !emit(AgentEvent{Type: AgentEventTypeResponseReset}) {
+					return
+				}
+				continue
+			}
+			// Premature-end recovery. DeepSeek can emit an ordinary end_turn
+			// immediately after saying it will perform the next action, leaving no
+			// structured tool call for Whale to execute. Recover only the narrow,
+			// dangling action-lead-in shape and only in Agent mode. The hidden nudge
+			// is persisted for diagnostics and the retry count is bounded so a
+			// provider that keeps stopping cannot spin forever.
+			canRetryPrematureEnd := a.maxTurns <= 0 || modelTurns < a.maxTurns
+			if canRetryPrematureEnd && prematureEndTurnNudges < maxPrematureEndTurnNudges &&
+				shouldRecoverPrematureEndTurn(assistant, a.mode, opts, len(toolSnapshot.Tools()) > 0) {
+				prematureEndTurnNudges++
+				nudge, err := a.persistPrematureEndTurnNudge(ctx, sessionID)
+				if err != nil {
+					emit(AgentEvent{Type: AgentEventTypeError, Err: err})
+					return
+				}
+				rt.Log.Append(assistant)
+				rt.Log.Append(nudge)
+				history = append(history, assistant, nudge)
+				if !emit(AgentEvent{Type: AgentEventTypePrematureEndRecovered}) {
+					return
+				}
+				// The announced action was already streamed. Drop it from live output
+				// so the recovered iteration supplies the response the user sees.
 				if !emit(AgentEvent{Type: AgentEventTypeResponseReset}) {
 					return
 				}
