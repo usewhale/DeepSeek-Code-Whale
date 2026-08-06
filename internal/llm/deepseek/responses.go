@@ -192,10 +192,18 @@ func toResponsesTools(tools []core.Tool) []map[string]any {
 // toResponsesInputItems converts Whale's message history into Responses API
 // input items. system/user/assistant messages map to message items, tool calls
 // map to function_call items, tool results map to function_call_output items,
-// and previously recorded web_search_call items are appended so the server can
-// restore search context (see webSearchCallRegistry).
+// and previously recorded web_search_call items are placed before the latest
+// user message so the server can restore search context without letting an old
+// search become the final (and therefore dominant) input item.
 func toResponsesInputItems(history []core.Message, searchCalls []map[string]any) []map[string]any {
 	out := make([]map[string]any, 0, len(history)*2)
+	lastUserIndex := -1
+	for i := len(history) - 1; i >= 0; i-- {
+		if history[i].Role == core.RoleUser {
+			lastUserIndex = i
+			break
+		}
+	}
 	syntheticCallCount := 0
 	// Keep every function_call from one assistant turn adjacent. DeepSeek
 	// merges adjacent reasoning/function_call items into a single assistant
@@ -222,7 +230,10 @@ func toResponsesInputItems(history []core.Message, searchCalls []map[string]any)
 		pending = nil
 		pendingByID = map[string]*pendingCall{}
 	}
-	for _, msg := range history {
+	for i, msg := range history {
+		if i == lastUserIndex {
+			out = append(out, searchCalls...)
+		}
 		switch msg.Role {
 		case core.RoleSystem:
 			flushMissing()
@@ -231,9 +242,12 @@ func toResponsesInputItems(history []core.Message, searchCalls []map[string]any)
 			flushMissing()
 			out = append(out, responsesMessageItem("user", core.MessagePlainText(msg)))
 		case core.RoleAssistant:
-			// Drop assistant turns that carry no information (mirrors
-			// toDeepSeekMessages).
-			if strings.TrimSpace(core.MessagePlainText(msg)) == "" && len(msg.ToolCalls) == 0 && strings.TrimSpace(msg.Reasoning) == "" {
+			// Reasoning is replayable only when it belongs to a tool-call turn.
+			// Plain assistant reasoning is private scratch state, and a failed
+			// reasoning-only stream is especially dangerous: replaying it makes
+			// the next request continue the stale task even after a new user
+			// message. This mirrors toDeepSeekMessages and the cache-shape rules.
+			if strings.TrimSpace(core.MessagePlainText(msg)) == "" && len(msg.ToolCalls) == 0 {
 				continue
 			}
 			flushMissing()
@@ -244,7 +258,7 @@ func toResponsesInputItems(history []core.Message, searchCalls []map[string]any)
 					"content": []map[string]any{{"type": "output_text", "text": text}},
 				})
 			}
-			if strings.TrimSpace(msg.Reasoning) != "" {
+			if len(msg.ToolCalls) > 0 && strings.TrimSpace(msg.Reasoning) != "" {
 				out = append(out, map[string]any{
 					"type":    "reasoning",
 					"content": []map[string]any{{"type": "reasoning_text", "text": msg.Reasoning}},
@@ -285,8 +299,8 @@ func toResponsesInputItems(history []core.Message, searchCalls []map[string]any)
 		}
 	}
 	flushMissing()
-	for _, item := range searchCalls {
-		out = append(out, item)
+	if lastUserIndex < 0 {
+		out = append(out, searchCalls...)
 	}
 	return out
 }

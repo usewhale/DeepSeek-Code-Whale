@@ -506,14 +506,14 @@ func TestResponsesHistoryInputItems(t *testing.T) {
 		{SessionID: "h1", Role: core.RoleUser, Text: "然后呢"},
 	}
 	items := toResponsesInputItems(history, nil)
-	if len(items) != 8 {
-		t.Fatalf("items = %d, want 8: %#v", len(items), items)
+	if len(items) != 7 {
+		t.Fatalf("items = %d, want 7: %#v", len(items), items)
 	}
 	types := make([]string, len(items))
 	for i, item := range items {
 		types[i], _ = item["type"].(string)
 	}
-	wantTypes := []string{"message", "message", "message", "reasoning", "message", "function_call", "function_call_output", "message"}
+	wantTypes := []string{"message", "message", "message", "message", "function_call", "function_call_output", "message"}
 	if strings.Join(types, ",") != strings.Join(wantTypes, ",") {
 		t.Fatalf("types = %#v, want %#v", types, wantTypes)
 	}
@@ -553,15 +553,67 @@ func TestResponsesHistoryInputItems(t *testing.T) {
 	}
 }
 
-func TestResponsesInputItemsAppendsSearchCalls(t *testing.T) {
+func TestResponsesHistoryDropsFailedReasoningOnlyAssistant(t *testing.T) {
 	history := []core.Message{
-		{SessionID: "h2", Role: core.RoleUser, Text: "搜一下"},
-		{SessionID: "h2", Role: core.RoleAssistant, Text: "答案是42"},
+		{SessionID: "stale", Role: core.RoleUser, Text: "old question"},
+		{SessionID: "stale", Role: core.RoleAssistant, Reasoning: "continue the old task", FinishReason: core.FinishReasonError},
+		{SessionID: "stale", Role: core.RoleUser, Text: "new unrelated question"},
+	}
+
+	items := toResponsesInputItems(history, nil)
+	if len(items) != 2 {
+		t.Fatalf("items = %d, want only the two user messages: %#v", len(items), items)
+	}
+	for _, item := range items {
+		if item["type"] == "reasoning" {
+			t.Fatalf("failed reasoning-only assistant leaked into provider history: %#v", item)
+		}
+	}
+	lastContent := items[1]["content"].([]map[string]any)
+	if got := lastContent[0]["text"]; got != "new unrelated question" {
+		t.Fatalf("last user input = %#v, want new question", got)
+	}
+}
+
+func TestResponsesHistoryKeepsToolCallReasoning(t *testing.T) {
+	history := []core.Message{
+		{SessionID: "tool-reasoning", Role: core.RoleAssistant, Reasoning: "need the tool", ToolCalls: []core.ToolCall{{ID: "call_1", Name: "shell_run", Input: `{}`}}},
+		{SessionID: "tool-reasoning", Role: core.RoleTool, ToolResults: []core.ToolResult{{ToolCallID: "call_1", Name: "shell_run", ModelText: "ok"}}},
+	}
+
+	items := toResponsesInputItems(history, nil)
+	wantTypes := []string{"reasoning", "function_call", "function_call_output"}
+	if len(items) != len(wantTypes) {
+		t.Fatalf("items = %d, want %d: %#v", len(items), len(wantTypes), items)
+	}
+	for i, want := range wantTypes {
+		if got := items[i]["type"]; got != want {
+			t.Fatalf("item %d type = %#v, want %q", i, got, want)
+		}
+	}
+}
+
+func TestResponsesInputItemsPlacesSearchCallsBeforeLatestUser(t *testing.T) {
+	history := []core.Message{
+		{SessionID: "h2", Role: core.RoleUser, Text: "old search"},
+		{SessionID: "h2", Role: core.RoleAssistant, Text: "old answer"},
+		{SessionID: "h2", Role: core.RoleUser, Text: "new unrelated question"},
 	}
 	items := toResponsesInputItems(history, []map[string]any{{"type": "web_search_call", "id": "ws_1"}})
+	if len(items) != 4 {
+		t.Fatalf("items = %d, want 4: %#v", len(items), items)
+	}
+	search := items[len(items)-2]
+	if search["type"] != "web_search_call" || search["id"] != "ws_1" {
+		t.Fatalf("penultimate item = %#v, want echoed web_search_call", search)
+	}
 	last := items[len(items)-1]
-	if last["type"] != "web_search_call" || last["id"] != "ws_1" {
-		t.Fatalf("last item = %#v, want echoed web_search_call", last)
+	if last["role"] != "user" {
+		t.Fatalf("last item = %#v, want latest user message", last)
+	}
+	content := last["content"].([]map[string]any)
+	if got := content[0]["text"]; got != "new unrelated question" {
+		t.Fatalf("last user input = %#v, want new question", got)
 	}
 }
 
