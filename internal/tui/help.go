@@ -45,13 +45,9 @@ func (m *model) handleHelpKey(msg tea.KeyMsg) tea.Cmd {
 	}
 	switch msg.String() {
 	case "up", "k":
-		if m.help.selected > 0 {
-			m.help.selected--
-		}
+		m.help.selected = wrapSelection(m.help.selected, len(commands), -1)
 	case "down", "j":
-		if m.help.selected < len(commands)-1 {
-			m.help.selected++
-		}
+		m.help.selected = wrapSelection(m.help.selected, len(commands), 1)
 	case "pgup", "ctrl+u":
 		m.help.selected = max(0, m.help.selected-m.helpVisibleCount())
 	case "pgdown", "ctrl+d":

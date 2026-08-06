@@ -94,6 +94,12 @@ func prevSessionChoiceIndex(rows []string, cur int) int {
 			return i
 		}
 	}
+	// Wrap around: nothing selectable above, continue from the bottom.
+	for i := len(rows) - 1; i > cur; i-- {
+		if sessionChoiceNumberAt(rows, i) > 0 {
+			return i
+		}
+	}
 	return cur
 }
 
@@ -102,6 +108,12 @@ func nextSessionChoiceIndex(rows []string, cur int) int {
 		return 0
 	}
 	for i := cur + 1; i < len(rows); i++ {
+		if sessionChoiceNumberAt(rows, i) > 0 {
+			return i
+		}
+	}
+	// Wrap around: nothing selectable below, continue from the top.
+	for i := 0; i < cur; i++ {
 		if sessionChoiceNumberAt(rows, i) > 0 {
 			return i
 		}

@@ -188,13 +188,9 @@ func (m *model) handleSkillsMenuKey(msg tea.KeyMsg) tea.Cmd {
 		m.skillsMenu.selected = 0
 		m.status = "ready"
 	case "up", "k":
-		if m.skillsMenu.selected > 0 {
-			m.skillsMenu.selected--
-		}
+		m.skillsMenu.selected = wrapSelection(m.skillsMenu.selected, len(items), -1)
 	case "down", "j":
-		if m.skillsMenu.selected < len(items)-1 {
-			m.skillsMenu.selected++
-		}
+		m.skillsMenu.selected = wrapSelection(m.skillsMenu.selected, len(items), 1)
 	case "enter":
 		switch m.skillsMenu.selected {
 		case 0:
@@ -319,12 +315,12 @@ func (m *model) handleSkillsManagerKey(msg tea.KeyMsg) tea.Cmd {
 		m.skillsManager.selected = 0
 		m.status = "ready"
 	case "up", "k":
-		if m.skillsManager.selected > 0 {
-			m.skillsManager.selected--
+		if len(m.skillsManager.matches) > 0 {
+			m.skillsManager.selected = wrapSelection(m.skillsManager.selected, len(m.skillsManager.matches), -1)
 		}
 	case "down", "j":
-		if m.skillsManager.selected < len(m.skillsManager.matches)-1 {
-			m.skillsManager.selected++
+		if len(m.skillsManager.matches) > 0 {
+			m.skillsManager.selected = wrapSelection(m.skillsManager.selected, len(m.skillsManager.matches), 1)
 		}
 	case "backspace":
 		if m.skillsManager.query != "" {

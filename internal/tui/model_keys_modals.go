@@ -207,24 +207,24 @@ func (m *model) handleModelPickerKey(msg tea.KeyMsg) tea.Cmd {
 			m.mode = modeChat
 		}
 	case "up", "k":
-		if m.modelPicker.stage == 0 && m.modelPicker.modelIx > 0 {
-			m.modelPicker.modelIx--
+		if m.modelPicker.stage == 0 {
+			m.modelPicker.modelIx = wrapSelection(m.modelPicker.modelIx, len(m.modelPicker.models), -1)
 		}
-		if m.modelPicker.stage == 1 && m.modelPicker.effIx > 0 {
-			m.modelPicker.effIx--
+		if m.modelPicker.stage == 1 {
+			m.modelPicker.effIx = wrapSelection(m.modelPicker.effIx, len(m.modelPicker.efforts), -1)
 		}
-		if m.modelPicker.stage == 2 && m.modelPicker.thinkIx > 0 {
-			m.modelPicker.thinkIx--
+		if m.modelPicker.stage == 2 {
+			m.modelPicker.thinkIx = wrapSelection(m.modelPicker.thinkIx, len(m.modelPicker.thinkings), -1)
 		}
 	case "down", "j":
-		if m.modelPicker.stage == 0 && m.modelPicker.modelIx < len(m.modelPicker.models)-1 {
-			m.modelPicker.modelIx++
+		if m.modelPicker.stage == 0 {
+			m.modelPicker.modelIx = wrapSelection(m.modelPicker.modelIx, len(m.modelPicker.models), 1)
 		}
-		if m.modelPicker.stage == 1 && m.modelPicker.effIx < len(m.modelPicker.efforts)-1 {
-			m.modelPicker.effIx++
+		if m.modelPicker.stage == 1 {
+			m.modelPicker.effIx = wrapSelection(m.modelPicker.effIx, len(m.modelPicker.efforts), 1)
 		}
-		if m.modelPicker.stage == 2 && m.modelPicker.thinkIx < len(m.modelPicker.thinkings)-1 {
-			m.modelPicker.thinkIx++
+		if m.modelPicker.stage == 2 {
+			m.modelPicker.thinkIx = wrapSelection(m.modelPicker.thinkIx, len(m.modelPicker.thinkings), 1)
 		}
 	case "enter":
 		if m.modelPicker.stage == 0 {
@@ -252,13 +252,9 @@ func (m *model) handlePermissionsMenuKey(msg tea.KeyMsg) tea.Cmd {
 	case "esc":
 		m.mode = modeChat
 	case "up", "k", "left", "h":
-		if m.permissionsMenu.selected > 0 {
-			m.permissionsMenu.selected--
-		}
+		m.permissionsMenu.selected = wrapSelection(m.permissionsMenu.selected, 4, -1)
 	case "down", "j", "right", "l", "tab":
-		if m.permissionsMenu.selected < 3 {
-			m.permissionsMenu.selected++
-		}
+		m.permissionsMenu.selected = wrapSelection(m.permissionsMenu.selected, 4, 1)
 	case "enter":
 		current := permissionsMode(m.autoAccept, m.autoReviewEnabled)
 		switch m.permissionsMenu.selected {
@@ -285,13 +281,9 @@ func (m *model) handlePlanImplementationKey(msg tea.KeyMsg) tea.Cmd {
 	case "esc":
 		m.declinePlanImplementation()
 	case "up", "k", "left", "h":
-		if m.planImplementation.index > 0 {
-			m.planImplementation.index--
-		}
+		m.planImplementation.index = wrapSelection(m.planImplementation.index, 2, -1)
 	case "down", "j", "right", "l", "tab":
-		if m.planImplementation.index < 1 {
-			m.planImplementation.index++
-		}
+		m.planImplementation.index = wrapSelection(m.planImplementation.index, 2, 1)
 	case "enter":
 		if m.localSubmitPending > 0 {
 			m.status = "wait for command to finish"
