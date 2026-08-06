@@ -229,14 +229,14 @@ func (m *model) handlePluginsManagerKey(msg tea.KeyMsg) tea.Cmd {
 			if m.pluginsManager.offset > 0 {
 				m.pluginsManager.offset--
 			}
-		} else if m.pluginsManager.selected > 0 {
-			m.pluginsManager.selected--
+		} else if len(m.pluginsManager.matches) > 0 {
+			m.pluginsManager.selected = wrapSelection(m.pluginsManager.selected, len(m.pluginsManager.matches), -1)
 		}
 	case "down", "j":
 		if m.pluginsManager.detail {
 			m.pluginsManager.offset++
-		} else if m.pluginsManager.selected < len(m.pluginsManager.matches)-1 {
-			m.pluginsManager.selected++
+		} else if len(m.pluginsManager.matches) > 0 {
+			m.pluginsManager.selected = wrapSelection(m.pluginsManager.selected, len(m.pluginsManager.matches), 1)
 		}
 	case " ", "space":
 		if m.pluginsManager.detail {

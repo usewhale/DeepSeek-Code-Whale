@@ -42,21 +42,17 @@ func (m *model) handleChatModeKey(msg tea.KeyMsg) (tea.Cmd, bool) {
 		}
 	case "up":
 		if m.hasSlashSuggestions() {
-			if m.slash.selected > 0 {
-				m.slash.selected--
-			}
+			m.slash.selected = wrapSelection(m.slash.selected, len(m.slash.matches), -1)
 			return nil, true
 		}
 		if m.hasFilePanel() {
-			if m.hasFileSuggestions() && m.files.selected > 0 {
-				m.files.selected--
+			if m.hasFileSuggestions() {
+				m.files.selected = wrapSelection(m.files.selected, len(m.files.matches), -1)
 			}
 			return nil, true
 		}
 		if m.hasSkillSuggestions() {
-			if m.skills.selected > 0 {
-				m.skills.selected--
-			}
+			m.skills.selected = wrapSelection(m.skills.selected, len(m.skills.matches), -1)
 			return nil, true
 		}
 		if m.shouldHandleHistoryNavigation() {
@@ -66,21 +62,17 @@ func (m *model) handleChatModeKey(msg tea.KeyMsg) (tea.Cmd, bool) {
 		}
 	case "down":
 		if m.hasSlashSuggestions() {
-			if m.slash.selected < len(m.slash.matches)-1 {
-				m.slash.selected++
-			}
+			m.slash.selected = wrapSelection(m.slash.selected, len(m.slash.matches), 1)
 			return nil, true
 		}
 		if m.hasFilePanel() {
-			if m.hasFileSuggestions() && m.files.selected < len(m.files.matches)-1 {
-				m.files.selected++
+			if m.hasFileSuggestions() {
+				m.files.selected = wrapSelection(m.files.selected, len(m.files.matches), 1)
 			}
 			return nil, true
 		}
 		if m.hasSkillSuggestions() {
-			if m.skills.selected < len(m.skills.matches)-1 {
-				m.skills.selected++
-			}
+			m.skills.selected = wrapSelection(m.skills.selected, len(m.skills.matches), 1)
 			return nil, true
 		}
 		if m.shouldHandleHistoryNavigation() {

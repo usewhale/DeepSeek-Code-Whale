@@ -28,13 +28,9 @@ func (m *model) handleReviewMenuKey(msg tea.KeyMsg) tea.Cmd {
 	case "esc", "ctrl+c":
 		m.closeReviewMenu()
 	case "up", "k":
-		if m.reviewMenu.selected > 0 {
-			m.reviewMenu.selected--
-		}
+		m.reviewMenu.selected = wrapSelection(m.reviewMenu.selected, len(items), -1)
 	case "down", "j":
-		if m.reviewMenu.selected < len(items)-1 {
-			m.reviewMenu.selected++
-		}
+		m.reviewMenu.selected = wrapSelection(m.reviewMenu.selected, len(items), 1)
 	case "enter":
 		if m.reviewMenu.selected < 0 || m.reviewMenu.selected >= len(items) {
 			return nil
