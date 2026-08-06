@@ -44,7 +44,18 @@ func (h *Handler) handlePrompt(req *RPCRequest) *RPCErrorResponse {
 	// the order prompts acquire the session's promptMu.
 	ctx, cancel := context.WithCancel(context.Background())
 	run := &promptRun{cancel: cancel}
+	// Re-resolve the session under the lock rather than trusting the earlier
+	// lookup: between that lookup and this registration, session/delete or LRU
+	// eviction may have removed the session (both under h.mu). Registering into
+	// a stale context and running the turn anyway would execute on a closed
+	// runtime and — for delete — resurrect the .jsonl the delete just removed.
 	h.mu.Lock()
+	sctx, ok = h.sessions[params.SessionID]
+	if !ok {
+		h.mu.Unlock()
+		cancel()
+		return NewErrorResponse(req.ID, ErrCodeInvalidParams, fmt.Sprintf("session not found: %s", params.SessionID))
+	}
 	if sctx.runs == nil {
 		sctx.runs = make(map[*promptRun]struct{})
 	}

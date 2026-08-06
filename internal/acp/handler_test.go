@@ -302,8 +302,8 @@ func TestInitializeAdvertisesSessionList(t *testing.T) {
 	if sc == nil || sc.List == nil {
 		t.Fatalf("expected sessionCapabilities.list to be advertised, got %+v", sc)
 	}
-	if sc.Delete != nil {
-		t.Fatalf("session/delete is not implemented and must not be advertised, got %+v", sc.Delete)
+	if sc.Delete == nil {
+		t.Fatalf("expected sessionCapabilities.delete to be advertised, got %+v", sc)
 	}
 }
 
@@ -1032,4 +1032,470 @@ func TestTranslateEventContextCompactedDroppedWithoutPanic(t *testing.T) {
 	}); u != nil {
 		t.Fatalf("ContextCompacted with info translated to %+v, want nil", u)
 	}
+}
+
+// deleteSessionRaw issues a session/delete request over a fresh handler bound
+// to the given store/sessions dirs, returning the parsed RPC error object
+// (nil on success). Params is used verbatim; empty means the params field is
+// omitted entirely.
+func deleteSessionRaw(t *testing.T, storeDir, sessionsDir, defaultCwd, params string) (map[string]any, error) {
+	t.Helper()
+	msgStore, err := store.NewJSONLStore(storeDir)
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	var buf bytes.Buffer
+	h := NewHandler(NewTransportWithIO(&buf, &buf, &buf), msgStore, defaultCwd)
+	h.SetSessionsDir(sessionsDir)
+	req := &RPCRequest{
+		JSONRPC: "2.0",
+		ID:      &RequestID{Value: 1},
+		Method:  MethodSessionDelete,
+	}
+	if params != "" {
+		req.Params = json.RawMessage(params)
+	}
+	h.handleRequest(req)
+	var resp struct {
+		Result DeleteSessionResponse `json:"result"`
+		Err    map[string]any        `json:"error"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &resp); err != nil {
+		return nil, fmt.Errorf("parse response: %w", err)
+	}
+	return resp.Err, nil
+}
+
+func assertSessionArtifactsGone(t *testing.T, dir, id string) {
+	t.Helper()
+	for _, suffix := range []string{".jsonl", ".meta.json", ".state.json", ".todo.json", ".user_input.json", ".goal.json", ".approval_events.jsonl", ".tool_input_events.jsonl", ".approvals.json", ".jsonl.tmp"} {
+		if _, err := os.Stat(filepath.Join(dir, core.SanitizeSessionID(id)+suffix)); !os.IsNotExist(err) {
+			t.Fatalf("expected %s%s removed, stat err=%v", id, suffix, err)
+		}
+	}
+}
+
+// TestSessionDeleteRemovesPersistedSession: happy path — the primary .jsonl
+// and every sidecar (meta, telemetry events, approvals, stale rewrite tmp)
+// are removed, and session/list no longer lists the session.
+func TestSessionDeleteRemovesPersistedSession(t *testing.T) {
+	dir := t.TempDir()
+	writeSessionFile(t, dir, "sess-1", "/work", "hello", time.Now())
+	for _, suffix := range []string{".state.json", ".todo.json", ".user_input.json", ".goal.json", ".approval_events.jsonl", ".tool_input_events.jsonl", ".approvals.json", ".jsonl.tmp"} {
+		if err := os.WriteFile(dir+"/sess-1"+suffix, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	rpcErr, err := deleteSessionRaw(t, dir, dir, "/work", `{"sessionId":"sess-1"}`)
+	if err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if rpcErr != nil {
+		t.Fatalf("delete errored: %v", rpcErr)
+	}
+	assertSessionArtifactsGone(t, dir, "sess-1")
+
+	resp, err := listSessionsFromDir(t, dir, "/work", `{}`)
+	if err != nil {
+		t.Fatalf("list after delete: %v", err)
+	}
+	if got := listSessionIDs(resp); len(got) != 0 {
+		t.Fatalf("deleted session still listed: %v", got)
+	}
+}
+
+// TestSessionDeleteUnknownIDIsIdempotentSuccess: deleting a session that has
+// no files and no live context succeeds (delete is naturally idempotent; the
+// client refreshes its list unconditionally) and removes nothing else.
+func TestSessionDeleteUnknownIDIsIdempotentSuccess(t *testing.T) {
+	dir := t.TempDir()
+	writeSessionFile(t, dir, "keep", "/work", "keep me", time.Now())
+
+	rpcErr, err := deleteSessionRaw(t, dir, dir, "/work", `{"sessionId":"nope"}`)
+	if err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if rpcErr != nil {
+		t.Fatalf("unknown-session delete must succeed, got %v", rpcErr)
+	}
+	if _, err := os.Stat(dir + "/keep.jsonl"); err != nil {
+		t.Fatalf("unrelated session removed: %v", err)
+	}
+}
+
+// TestSessionDeleteInvalidParams: missing/malformed params, empty ids, and
+// path-unsafe ids are rejected with ErrCodeInvalidParams before any file
+// access; the session file must be untouched.
+func TestSessionDeleteInvalidParams(t *testing.T) {
+	dir := t.TempDir()
+	writeSessionFile(t, dir, "sess-1", "/work", "hello", time.Now())
+
+	cases := []struct{ name, params string }{
+		{"omitted params", ""},
+		{"malformed params", `{`},
+		{"empty id", `{"sessionId":""}`},
+		{"blank id", `{"sessionId":"   "}`},
+		{"dot", `{"sessionId":"."}`},
+		{"dotdot", `{"sessionId":".."}`},
+		{"traversal", `{"sessionId":"../x"}`},
+		{"slash", `{"sessionId":"a/b"}`},
+		{"backslash", `{"sessionId":"a\\b"}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rpcErr, err := deleteSessionRaw(t, dir, dir, "/work", tc.params)
+			if err != nil {
+				t.Fatalf("delete: %v", err)
+			}
+			if rpcErr == nil {
+				t.Fatalf("expected error for %q", tc.params)
+			}
+			if code, _ := rpcErr["code"].(float64); int(code) != ErrCodeInvalidParams {
+				t.Fatalf("code = %v, want %d", rpcErr["code"], ErrCodeInvalidParams)
+			}
+			if _, err := os.Stat(dir + "/sess-1.jsonl"); err != nil {
+				t.Fatalf("session file touched by invalid delete: %v", err)
+			}
+		})
+	}
+}
+
+// TestSessionDeleteMetaDirUnset: without a configured sessions directory the
+// handler cannot remove artifacts and must report an internal error rather
+// than a false success.
+func TestSessionDeleteMetaDirUnset(t *testing.T) {
+	msgStore, err := store.NewJSONLStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	var buf bytes.Buffer
+	h := NewHandler(NewTransportWithIO(&buf, &buf, &buf), msgStore, "/work")
+	h.handleRequest(&RPCRequest{
+		JSONRPC: "2.0",
+		ID:      &RequestID{Value: 1},
+		Method:  MethodSessionDelete,
+		Params:  json.RawMessage(`{"sessionId":"acp-x"}`),
+	})
+	var resp struct {
+		Err struct{ Code int } `json:"error"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &resp); err != nil {
+		t.Fatalf("parse response: %v", err)
+	}
+	if resp.Err.Code != ErrCodeInternal {
+		t.Fatalf("code = %d, want %d", resp.Err.Code, ErrCodeInternal)
+	}
+}
+
+// TestSessionDeleteLiveIdleSession: a live-but-idle session is removed from
+// the handler map, its runtime Close hook fires off the request path, and its
+// persisted artifacts are removed.
+func TestSessionDeleteLiveIdleSession(t *testing.T) {
+	dir := t.TempDir()
+	closed := make(chan struct{})
+	var once sync.Once
+	rec := &factoryRecorder{closeFn: func() { once.Do(func() { close(closed) }) }}
+	msgStore, err := store.NewJSONLStore(dir)
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	var buf bytes.Buffer
+	h := NewHandler(NewTransportWithIO(&buf, &buf, &buf), msgStore, "/work")
+	h.SetSessionsDir(dir)
+	h.SetRuntimeFactory(func(acpSessionID, cwd string, mcps []MCPServer) (*SessionRuntime, error) {
+		return &SessionRuntime{Close: rec.closeFn}, nil
+	})
+	h.handleRequest(&RPCRequest{
+		JSONRPC: "2.0",
+		ID:      &RequestID{Value: 1},
+		Method:  MethodSessionNew,
+		Params:  json.RawMessage(`{"cwd":"/work"}`),
+	})
+	var id string
+	h.mu.Lock()
+	for k := range h.sessions {
+		id = k
+	}
+	h.mu.Unlock()
+	if id == "" {
+		t.Fatal("no session created")
+	}
+	if err := os.WriteFile(dir+"/"+id+".jsonl", []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	buf.Reset()
+	h.handleRequest(&RPCRequest{
+		JSONRPC: "2.0",
+		ID:      &RequestID{Value: 2},
+		Method:  MethodSessionDelete,
+		Params:  json.RawMessage(`{"sessionId":"` + id + `"}`),
+	})
+	var resp struct {
+		Result DeleteSessionResponse `json:"result"`
+		Err    map[string]any        `json:"error"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &resp); err != nil {
+		t.Fatalf("parse delete response: %v", err)
+	}
+	if resp.Err != nil {
+		t.Fatalf("delete live idle session errored: %v", resp.Err)
+	}
+	h.mu.Lock()
+	_, stillLive := h.sessions[id]
+	h.mu.Unlock()
+	if stillLive {
+		t.Fatal("deleted session still in handler map")
+	}
+	select {
+	case <-closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runtime Close not invoked for deleted idle session")
+	}
+	if _, err := os.Stat(dir + "/" + id + ".jsonl"); !os.IsNotExist(err) {
+		t.Fatalf("live session artifact not removed: %v", err)
+	}
+}
+
+// TestSessionDeleteRefusesInFlight: a session with an active prompt cannot be
+// deleted — every .jsonl writer (turn append, compaction rewrite) runs during
+// a turn, so deleting mid-turn would let the prompt resurrect the file. The
+// session stays live and its artifacts stay intact.
+func TestSessionDeleteRefusesInFlight(t *testing.T) {
+	dir := t.TempDir()
+	closed := 0
+	rec := &factoryRecorder{closeFn: func() { closed++ }}
+	msgStore, err := store.NewJSONLStore(dir)
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	var buf bytes.Buffer
+	h := NewHandler(NewTransportWithIO(&buf, &buf, &buf), msgStore, "/work")
+	h.SetSessionsDir(dir)
+	h.SetRuntimeFactory(func(acpSessionID, cwd string, mcps []MCPServer) (*SessionRuntime, error) {
+		return &SessionRuntime{Close: rec.closeFn}, nil
+	})
+	h.handleRequest(&RPCRequest{
+		JSONRPC: "2.0",
+		ID:      &RequestID{Value: 1},
+		Method:  MethodSessionNew,
+		Params:  json.RawMessage(`{"cwd":"/work"}`),
+	})
+	var id string
+	h.mu.Lock()
+	for k := range h.sessions {
+		id = k
+	}
+	h.sessions[id].runs = map[*promptRun]struct{}{{}: {}}
+	h.mu.Unlock()
+	if err := os.WriteFile(dir+"/"+id+".jsonl", []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	buf.Reset()
+	h.handleRequest(&RPCRequest{
+		JSONRPC: "2.0",
+		ID:      &RequestID{Value: 2},
+		Method:  MethodSessionDelete,
+		Params:  json.RawMessage(`{"sessionId":"` + id + `"}`),
+	})
+	var resp struct {
+		Err struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &resp); err != nil {
+		t.Fatalf("parse delete response: %v", err)
+	}
+	if resp.Err.Code != ErrCodeInternal {
+		t.Fatalf("code = %d, want %d (in-flight refusal)", resp.Err.Code, ErrCodeInternal)
+	}
+	h.mu.Lock()
+	_, stillLive := h.sessions[id]
+	h.mu.Unlock()
+	if !stillLive {
+		t.Fatal("in-flight session removed from map despite refusal")
+	}
+	if _, err := os.Stat(dir + "/" + id + ".jsonl"); err != nil {
+		t.Fatalf("in-flight session artifact removed: %v", err)
+	}
+	if closed != 0 {
+		t.Fatalf("runtime Close invoked on refused delete (%d calls)", closed)
+	}
+}
+
+// TestSessionDeleteThenLoadReplaysNothing pins the post-delete contract:
+// session/load finds no messages and replays zero updates (load is lenient —
+// it logs and continues with an empty history rather than erroring).
+func TestSessionDeleteThenLoadReplaysNothing(t *testing.T) {
+	dir := t.TempDir()
+	writeSessionFile(t, dir, "gone", "/work", "hello", time.Now())
+	msgStore, err := store.NewJSONLStore(dir)
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	var buf bytes.Buffer
+	h := NewHandler(NewTransportWithIO(&buf, &buf, &buf), msgStore, "/work")
+	h.SetSessionsDir(dir)
+	h.SetRuntimeFactory(func(acpSessionID, cwd string, mcps []MCPServer) (*SessionRuntime, error) {
+		return &SessionRuntime{}, nil
+	})
+	h.handleRequest(&RPCRequest{
+		JSONRPC: "2.0",
+		ID:      &RequestID{Value: 1},
+		Method:  MethodSessionDelete,
+		Params:  json.RawMessage(`{"sessionId":"gone"}`),
+	})
+
+	buf.Reset()
+	h.handleRequest(&RPCRequest{
+		JSONRPC: "2.0",
+		ID:      &RequestID{Value: 2},
+		Method:  MethodSessionLoad,
+		Params:  json.RawMessage(`{"sessionId":"gone","cwd":"/work"}`),
+	})
+	for _, line := range strings.Split(buf.String(), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var msg struct {
+			Method string `json:"method"`
+		}
+		if err := json.Unmarshal([]byte(line), &msg); err != nil {
+			t.Fatalf("bad response line: %v", err)
+		}
+		if msg.Method == MethodSessionUpdate {
+			t.Fatalf("load after delete replayed a message: %s", line)
+		}
+	}
+}
+
+// TestSessionDeleteJSONLRemovalFailureIsFatal: when the primary .jsonl cannot
+// be removed (here, it is a directory), delete must fail with an internal
+// error rather than report success — the session's history must not silently
+// survive a successful delete.
+func TestSessionDeleteJSONLRemovalFailureIsFatal(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Mkdir(dir+"/blocked.jsonl", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dir+"/blocked.jsonl/child", []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rpcErr, err := deleteSessionRaw(t, dir, dir, "/work", `{"sessionId":"blocked"}`)
+	if err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if rpcErr == nil {
+		t.Fatal("delete succeeded despite failed .jsonl removal")
+	}
+	if code, _ := rpcErr["code"].(float64); int(code) != ErrCodeInternal {
+		t.Fatalf("code = %v, want %d", rpcErr["code"], ErrCodeInternal)
+	}
+	if st, err := os.Stat(dir + "/blocked.jsonl"); err != nil || !st.IsDir() {
+		t.Fatalf("blocking path not preserved: %v", err)
+	}
+}
+
+// TestSessionDeleteConcurrentWithList hammers session/delete (idempotent) and
+// session/list from many goroutines over one shared handler. Run under -race:
+// every response must be well-formed, no session may error spuriously, and the
+// victim's artifacts must be gone at the end.
+func TestSessionDeleteConcurrentWithList(t *testing.T) {
+	dir := t.TempDir()
+	writeSessionFile(t, dir, "victim", "/work", "hello", time.Now())
+	msgStore, err := store.NewJSONLStore(dir)
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	var buf bytes.Buffer
+	h := NewHandler(NewTransportWithIO(&buf, &buf, &buf), msgStore, "/work")
+	h.SetSessionsDir(dir)
+
+	const deleters = 8
+	var wg sync.WaitGroup
+	for i := 0; i < deleters; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			for j := 0; j < 25; j++ {
+				h.handleRequest(&RPCRequest{
+					JSONRPC: "2.0",
+					ID:      &RequestID{Value: n*1000 + j},
+					Method:  MethodSessionDelete,
+					Params:  json.RawMessage(`{"sessionId":"victim"}`),
+				})
+			}
+		}(i)
+	}
+	for k := 0; k < 25; k++ {
+		h.handleRequest(&RPCRequest{
+			JSONRPC: "2.0",
+			ID:      &RequestID{Value: 10000 + k},
+			Method:  MethodSessionList,
+			Params:  json.RawMessage(`{}`),
+		})
+	}
+	wg.Wait()
+
+	deleteErrors := 0
+	for _, line := range strings.Split(buf.String(), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var msg struct {
+			ID  float64        `json:"id"`
+			Err map[string]any `json:"error"`
+		}
+		if err := json.Unmarshal([]byte(line), &msg); err != nil {
+			t.Fatalf("bad response line: %v", err)
+		}
+		if msg.ID < 10000 && msg.Err != nil {
+			deleteErrors++
+		}
+	}
+	if deleteErrors != 0 {
+		t.Fatalf("%d session/delete calls errored (delete must be idempotent)", deleteErrors)
+	}
+	assertSessionArtifactsGone(t, dir, "victim")
+}
+
+// TestSessionDeleteMetaDirIsFile: when the sessions directory path is a
+// regular file, removing artifacts under it fails with ENOTDIR — delete must
+// report an internal error instead of a false success.
+func TestSessionDeleteMetaDirIsFile(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "notadir")
+	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rpcErr, err := deleteSessionRaw(t, dir, file, "/work", `{"sessionId":"sess-1"}`)
+	if err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if rpcErr == nil {
+		t.Fatal("delete succeeded with a file as sessions dir")
+	}
+	if code, _ := rpcErr["code"].(float64); int(code) != ErrCodeInternal {
+		t.Fatalf("code = %v, want %d", rpcErr["code"], ErrCodeInternal)
+	}
+}
+
+// TestSessionDeleteIgnoresMetaField: the ACP schema allows an optional _meta
+// object on any request; it must not break delete.
+func TestSessionDeleteIgnoresMetaField(t *testing.T) {
+	dir := t.TempDir()
+	writeSessionFile(t, dir, "sess-1", "/work", "hello", time.Now())
+	rpcErr, err := deleteSessionRaw(t, dir, dir, "/work", `{"sessionId":"sess-1","_meta":{"why":"cleanup"}}`)
+	if err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if rpcErr != nil {
+		t.Fatalf("delete with _meta errored: %v", rpcErr)
+	}
+	assertSessionArtifactsGone(t, dir, "sess-1")
 }
