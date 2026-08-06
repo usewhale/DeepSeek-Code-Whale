@@ -294,6 +294,8 @@ func (h *Handler) handleRequest(req *RPCRequest) {
 		errResp = h.handleSessionLoad(req)
 	case MethodSessionList:
 		errResp = h.handleSessionList(req)
+	case MethodSessionDelete:
+		errResp = h.handleSessionDelete(req)
 	case MethodSessionSetMode:
 		errResp = h.handleSetMode(req)
 	case MethodSessionCancel:
@@ -334,7 +336,8 @@ func (h *Handler) handleInitialize(req *RPCRequest) *RPCErrorResponse {
 			},
 			MCPCapabilities: &MCPCapabilities{HTTP: false, SSE: false},
 			SessionCapabilities: &SessionCapabilities{
-				List: &SessionListCapabilities{},
+				List:   &SessionListCapabilities{},
+				Delete: &SessionDeleteCapabilities{},
 			},
 		},
 		AgentInfo: &Implementation{Name: "whale", Title: "Whale", Version: "0.1.0"},
@@ -566,6 +569,99 @@ func (h *Handler) handleSessionList(req *RPCRequest) *RPCErrorResponse {
 		})
 	}
 	h.transport.SendResponse(NewSuccessResponse(req.ID, ListSessionsResponse{Sessions: out}))
+	return nil
+}
+
+// handleSessionDelete implements the ACP session/delete method: it removes a
+// persisted session so it disappears from session/list and can no longer be
+// loaded. Delete is idempotent — an unknown session deletes successfully
+// (Zed refreshes its list regardless), matching the ACP schema where the
+// client owns list refresh.
+//
+// The one refused case is a session with an in-flight prompt. Every writer
+// that appends to or rewrites the session's .jsonl (turn-message append,
+// auto-compaction's tmp+rename) runs only while a turn is active — the same
+// invariant eviction relies on. Without this guard, deleting the file while a
+// prompt is mid-turn would let the prompt recreate it (file resurrection) and
+// the session would reappear on the next list refresh.
+func (h *Handler) handleSessionDelete(req *RPCRequest) *RPCErrorResponse {
+	var params DeleteSessionRequest
+	// Params are required here (unlike session/list): a delete for no session
+	// is meaningless, and a client that omits them sent an invalid request.
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		return NewErrorResponse(req.ID, ErrCodeInvalidParams, fmt.Sprintf("invalid params: %v", err))
+	}
+	id := strings.TrimSpace(params.SessionID)
+	if id == "" || !isSafeSessionID(id) {
+		return NewErrorResponse(req.ID, ErrCodeInvalidParams, fmt.Sprintf("invalid sessionId: %q", params.SessionID))
+	}
+	sessionsDir := h.metaDir
+	if sessionsDir == "" {
+		return NewErrorResponse(req.ID, ErrCodeInternal, "session store not configured")
+	}
+
+	// Live-session handling under h.mu: refuse in-flight prompts; otherwise
+	// drop the session from the map and close its runtime off the request path
+	// (an MCP stdio close can take ~5s — mirrors eviction).
+	var closeFn func()
+	h.mu.Lock()
+	if sctx, ok := h.sessions[id]; ok {
+		if len(sctx.runs) > 0 {
+			h.mu.Unlock()
+			return NewErrorResponse(req.ID, ErrCodeInternal, "session has an in-flight prompt; cannot delete")
+		}
+		delete(h.sessions, id)
+		if sctx.runtime != nil {
+			closeFn = sctx.runtime.Close
+		}
+	}
+	h.mu.Unlock()
+	if closeFn != nil {
+		go closeFn()
+	}
+
+	if err := removeSessionFiles(sessionsDir, id); err != nil {
+		Logger.Printf("failed to delete session %s: %v", id, err)
+		return NewErrorResponse(req.ID, ErrCodeInternal, fmt.Sprintf("failed to delete session files: %v", err))
+	}
+	Logger.Printf("session deleted: %s", id)
+	h.transport.SendResponse(NewSuccessResponse(req.ID, DeleteSessionResponse{}))
+	return nil
+}
+
+// removeSessionFiles deletes a session's persisted artifacts. The primary
+// .jsonl is fatal on failure — the session's history must not silently
+// survive — while the sidecars are best-effort: they cover both the ACP
+// writers (meta sidecar) and the shared store convention (approvals file,
+// telemetry event logs, stale .jsonl.tmp left by an interrupted rewrite),
+// and a leftover sidecar alone must not fail a successful delete.
+func removeSessionFiles(sessionsDir, id string) error {
+	name := core.SanitizeSessionID(id)
+	primary := filepath.Join(sessionsDir, name+".jsonl")
+	if err := os.Remove(primary); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove session file: %w", err)
+	}
+	for _, suffix := range []string{
+		".meta.json",
+		// Session-scoped sidecars persisted by the state helpers under
+		// internal/session: mode (mode_state.go), todos (todo_state.go),
+		// pending user-input questions (user_input_state.go), and goal
+		// (goal_state.go). Deleting the thread must not leave these behind —
+		// they would resurrect mode/todos/objective on a future load.
+		".state.json",
+		".todo.json",
+		".user_input.json",
+		".goal.json",
+		core.ApprovalEventsSuffix,
+		core.ToolInputEventsSuffix,
+		".approvals.json",
+		".jsonl.tmp",
+	} {
+		path := filepath.Join(sessionsDir, name+suffix)
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			Logger.Printf("failed to remove %s for session %s: %v", suffix, id, err)
+		}
+	}
 	return nil
 }
 

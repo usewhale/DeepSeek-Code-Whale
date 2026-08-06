@@ -118,6 +118,7 @@ const (
 	MethodSessionNew          = "session/new"
 	MethodSessionLoad         = "session/load"
 	MethodSessionList         = "session/list"
+	MethodSessionDelete       = "session/delete"
 	MethodSessionSetMode      = "session/set_mode"
 	MethodSessionSetConfigOpt = "session/set_config_option"
 	MethodSessionPrompt       = "session/prompt"
@@ -202,8 +203,9 @@ type SessionCapabilities struct {
 	// object means the agent supports listing sessions (see ACP session
 	// management); clients such as Zed gate their session-history UI on it.
 	List *SessionListCapabilities `json:"list,omitempty"`
-	// Delete advertises support for the session/delete method. Not implemented
-	// by whale-acp, so it is intentionally never advertised.
+	// Delete advertises support for the session/delete method. Supplying an
+	// empty object means the agent supports deleting sessions (see ACP session
+	// management); clients such as Zed gate the agent-panel Trash button on it.
 	Delete *SessionDeleteCapabilities `json:"delete,omitempty"`
 	// AdditionalDirectories advertises support for additionalDirectories on
 	// session lifecycle requests. Not implemented.
@@ -373,6 +375,25 @@ type SessionInfo struct {
 	AdditionalDirectories []string `json:"additionalDirectories,omitempty"`
 	Title                 string   `json:"title,omitempty"`
 	UpdatedAt             string   `json:"updatedAt,omitempty"`
+}
+
+// ---------------------------------------------------------------------------
+// Session / delete
+// ---------------------------------------------------------------------------
+
+// DeleteSessionRequest deletes a persisted session so it no longer appears in
+// session/list and can no longer be loaded. Per the ACP schema the sessionId
+// is required; _meta is ignored.
+type DeleteSessionRequest struct {
+	SessionID string         `json:"sessionId"`
+	Meta      map[string]any `json:"_meta,omitempty"`
+}
+
+// DeleteSessionResponse is the empty success result of session/delete. The
+// client refreshes its session list itself (e.g. Zed sends
+// SessionListUpdate::Refresh), so no notification is returned.
+type DeleteSessionResponse struct {
+	Meta map[string]any `json:"_meta,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
