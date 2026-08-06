@@ -6,6 +6,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/usewhale/whale/internal/agent"
 	"github.com/usewhale/whale/internal/app"
 	"github.com/usewhale/whale/internal/core"
 	"github.com/usewhale/whale/internal/plugins"
@@ -158,12 +159,13 @@ const (
 
 type Service struct {
 	ctx              context.Context
-	serviceCtxCancel context.CancelFunc
+	serviceCtxCancel context.CancelCauseFunc
 	app              *app.App
 	events           chan Event
 	localSubmits     chan string
 	cancelMu         sync.Mutex
 	cancel           context.CancelFunc
+	cancelCause      context.CancelCauseFunc
 	active           bool
 	bgWG             sync.WaitGroup
 
@@ -192,10 +194,10 @@ type userInputDecision struct {
 }
 
 func New(ctx context.Context, cfg app.Config, start app.StartOptions) (*Service, error) {
-	ctx, cancel := context.WithCancel(ctx)
+	ctx, cancel := context.WithCancelCause(ctx)
 	a, err := app.New(ctx, cfg, start)
 	if err != nil {
-		cancel()
+		cancel(context.Canceled)
 		return nil, err
 	}
 	s := &Service{
@@ -337,7 +339,7 @@ func (s *Service) Close() error {
 		return nil
 	}
 	if s.serviceCtxCancel != nil {
-		s.serviceCtxCancel()
+		s.serviceCtxCancel(agent.ErrServiceShutdown)
 	}
 	s.bgWG.Wait()
 	return s.app.Close()

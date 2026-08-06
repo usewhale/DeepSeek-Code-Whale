@@ -65,6 +65,34 @@ func TestRunStreamCancelCurrentTurn(t *testing.T) {
 	}
 }
 
+func TestRunStreamServiceShutdownDoesNotPersistUserInterruptMarker(t *testing.T) {
+	store := NewInMemoryStore()
+	a := NewAgent(&cancelThenSummaryProvider{}, store, nil)
+	ctx, cancel := context.WithCancelCause(context.Background())
+	time.AfterFunc(10*time.Millisecond, func() { cancel(ErrServiceShutdown) })
+
+	events, err := a.RunStream(ctx, "s-service-shutdown", "hi")
+	if err != nil {
+		t.Fatalf("run stream failed: %v", err)
+	}
+	seenCancelled := false
+	for ev := range events {
+		if ev.Type == AgentEventTypeTurnCancelled {
+			seenCancelled = true
+		}
+	}
+	if !seenCancelled {
+		t.Fatal("expected turn_cancelled event")
+	}
+
+	msgs, _ := store.List(context.Background(), "s-service-shutdown")
+	for _, msg := range msgs {
+		if strings.Contains(msg.Text, "<turn_aborted>") {
+			t.Fatalf("service shutdown must not persist a user interrupt marker: %+v", msg)
+		}
+	}
+}
+
 func TestRunCancelCurrentTurnReturnsContextCanceled(t *testing.T) {
 	store := NewInMemoryStore()
 	a := NewAgent(&cancelThenSummaryProvider{}, store, nil)

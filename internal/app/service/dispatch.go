@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/usewhale/whale/internal/agent"
 	"github.com/usewhale/whale/internal/app"
 	"github.com/usewhale/whale/internal/core"
 	"github.com/usewhale/whale/internal/policy"
@@ -48,7 +49,9 @@ func (s *Service) Dispatch(in Intent) {
 		}
 	case IntentShutdown:
 		s.cancelMu.Lock()
-		if s.cancel != nil {
+		if s.cancelCause != nil {
+			s.cancelCause(agent.ErrUserInterrupt)
+		} else if s.cancel != nil {
 			s.cancel()
 		}
 		s.cancelMu.Unlock()
