@@ -31,12 +31,11 @@ func (m *model) handleChatModeKey(msg tea.KeyMsg) (tea.Cmd, bool) {
 			m.refreshViewportContent()
 			return m.flushNativeScrollbackCmd(), true
 		}
-		// Blocked while busy: the permission intents emit EventTurnDone, which
-		// the TUI treats as turn completion — dispatching mid-turn would commit
-		// the live transcript and clear busy while the backend keeps streaming.
-		// Mid-turn auto-accept is still available from the approval modal
-		// (approve + enable auto-accept), which uses a quiet intent path.
-		if !m.busy && !m.hasSlashSuggestions() && !m.hasFilePanel() && !m.hasSkillSuggestions() {
+		// Allowed while busy: the permission intents emit EventTurnDone, which
+		// the TUI treats as turn completion, so cyclePermissions dispatches the
+		// quiet variants mid-turn (no EventTurnDone) — same path as the approval
+		// modal's approve + enable auto-accept.
+		if !m.hasSlashSuggestions() && !m.hasFilePanel() && !m.hasSkillSuggestions() {
 			m.cyclePermissions()
 			return nil, true
 		}
@@ -129,19 +128,23 @@ func (m *model) handleChatModeKey(msg tea.KeyMsg) (tea.Cmd, bool) {
 // cyclePermissions advances the permission mode with the Alt+P shortcut:
 // ask -> auto-review -> auto-accept -> ask. Local state is updated
 // optimistically so the footer indicator responds instantly; the service
-// confirms the same state via EventInfo (AutoAcceptKnown).
+// confirms the same state via EventInfo (AutoAcceptKnown). While a turn is
+// busy the intents are dispatched with Quiet set so the service does not emit
+// EventTurnDone, which the TUI would otherwise treat as turn completion and
+// commit the live transcript while the backend keeps streaming.
 func (m *model) cyclePermissions() {
+	quiet := m.busy
 	switch nextPermissionsMode(m.autoAccept, m.autoReviewEnabled) {
 	case "auto-review":
-		m.dispatchIntent(protocol.Intent{Kind: protocol.IntentSetAutoReview, AutoReview: true})
+		m.dispatchIntent(protocol.Intent{Kind: protocol.IntentSetAutoReview, AutoReview: true, Quiet: quiet})
 		m.autoReviewEnabled = true
 		m.autoAccept = false
 	case "auto-accept":
-		m.dispatchIntent(protocol.Intent{Kind: protocol.IntentSetApprovalMode, ApprovalMode: "auto_accept"})
+		m.dispatchIntent(protocol.Intent{Kind: protocol.IntentSetApprovalMode, ApprovalMode: "auto_accept", Quiet: quiet})
 		m.autoAccept = true
 		m.autoReviewEnabled = false
 	default: // ask
-		m.dispatchIntent(protocol.Intent{Kind: protocol.IntentSetApprovalMode, ApprovalMode: "ask"})
+		m.dispatchIntent(protocol.Intent{Kind: protocol.IntentSetApprovalMode, ApprovalMode: "ask", Quiet: quiet})
 		m.autoAccept = false
 		m.autoReviewEnabled = false
 	}

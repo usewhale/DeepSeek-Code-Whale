@@ -85,7 +85,9 @@ func (s *Service) Dispatch(in Intent) {
 			msg = "Ask for approval"
 		}
 		s.emit(Event{Kind: EventInfo, Text: msg, AutoAccept: enabled, AutoAcceptKnown: true})
-		s.emit(Event{Kind: EventTurnDone, LastResponse: msg})
+		if !in.Quiet {
+			s.emit(Event{Kind: EventTurnDone, LastResponse: msg})
+		}
 	case IntentSetAutoReview:
 		s.app.SetAutoReviewEnabled(in.AutoReview)
 		msg := "Auto-review enabled"
@@ -94,7 +96,9 @@ func (s *Service) Dispatch(in Intent) {
 		}
 		enabled := s.app.AutoAcceptPermissions()
 		s.emit(Event{Kind: EventInfo, Text: msg, AutoAccept: enabled, AutoAcceptKnown: true, AutoReview: in.AutoReview})
-		s.emit(Event{Kind: EventTurnDone, LastResponse: msg})
+		if !in.Quiet {
+			s.emit(Event{Kind: EventTurnDone, LastResponse: msg})
+		}
 	case IntentEnableAutoAccept:
 		s.app.SetAutoAcceptPermissions(true)
 		s.emit(Event{Kind: EventInfo, Text: autoAcceptMessage(true), AutoAccept: true, AutoAcceptKnown: true})

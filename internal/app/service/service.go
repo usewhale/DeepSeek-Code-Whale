@@ -68,6 +68,7 @@ type Intent struct {
 	Thinking           string
 	ApprovalMode       string
 	AutoReview         bool
+	Quiet              bool
 	ViewMode           string
 	SkillName          string
 	SkillEnabled       bool

@@ -19,8 +19,8 @@ func TestAltPCyclesPermissionModes(t *testing.T) {
 
 	// ask -> auto-review
 	m, _ = updateTestModel(t, m, altPKey())
-	if len(*intents) != 1 || (*intents)[0].Kind != protocol.IntentSetAutoReview || (*intents)[0].AutoReview != true {
-		t.Fatalf("expected auto_review intent from ask, got %+v", *intents)
+	if len(*intents) != 1 || (*intents)[0].Kind != protocol.IntentSetAutoReview || (*intents)[0].AutoReview != true || (*intents)[0].Quiet {
+		t.Fatalf("expected non-quiet auto_review intent from ask, got %+v", *intents)
 	}
 	if !m.autoReviewEnabled || m.autoAccept {
 		t.Fatalf("expected optimistic auto-review state, got autoReview=%v autoAccept=%v", m.autoReviewEnabled, m.autoAccept)
@@ -54,22 +54,55 @@ func TestAltPCyclesPermissionModes(t *testing.T) {
 	}
 }
 
-func TestAltPBlockedWhileBusy(t *testing.T) {
+func TestAltPCyclesWhileBusy(t *testing.T) {
 	m, intents := newModelWithDispatchSpy()
 	m.busy = true
 	m.busySince = time.Now().Add(-5 * time.Minute)
 	m.status = "running"
 
+	// ask -> auto-review (quiet: no EventTurnDone mid-turn)
 	m, _ = updateTestModel(t, m, altPKey())
-
-	if len(*intents) != 0 {
-		t.Fatalf("busy turn should block permission cycle, got %+v", *intents)
+	if len(*intents) != 1 {
+		t.Fatalf("expected one auto_review intent, got %+v", *intents)
+	}
+	got := (*intents)[0]
+	if got.Kind != protocol.IntentSetAutoReview || !got.AutoReview || !got.Quiet {
+		t.Fatalf("expected quiet auto_review intent, got %+v", got)
+	}
+	if !m.autoReviewEnabled || m.autoAccept {
+		t.Fatalf("expected optimistic auto-review state, got autoReview=%v autoAccept=%v", m.autoReviewEnabled, m.autoAccept)
 	}
 	if !m.busy {
-		t.Fatal("busy turn should remain busy after blocked Alt+P")
+		t.Fatal("busy turn should remain busy after mid-turn Alt+P")
 	}
 	if m.status != "running" {
 		t.Fatalf("busy turn status should be preserved, got %q", m.status)
+	}
+
+	// auto-review -> auto-accept (quiet)
+	m, _ = updateTestModel(t, m, altPKey())
+	if len(*intents) != 2 {
+		t.Fatalf("expected two intents after second Alt+P, got %+v", *intents)
+	}
+	got = (*intents)[1]
+	if got.Kind != protocol.IntentSetApprovalMode || got.ApprovalMode != "auto_accept" || !got.Quiet {
+		t.Fatalf("expected quiet auto_accept intent, got %+v", got)
+	}
+	if !m.busy || !m.autoAccept || m.autoReviewEnabled {
+		t.Fatalf("unexpected state after second Alt+P: busy=%v autoReview=%v autoAccept=%v", m.busy, m.autoReviewEnabled, m.autoAccept)
+	}
+
+	// auto-accept -> ask (quiet)
+	m, _ = updateTestModel(t, m, altPKey())
+	if len(*intents) != 3 {
+		t.Fatalf("expected three intents after third Alt+P, got %+v", *intents)
+	}
+	got = (*intents)[2]
+	if got.Kind != protocol.IntentSetApprovalMode || got.ApprovalMode != "ask" || !got.Quiet {
+		t.Fatalf("expected quiet ask intent, got %+v", got)
+	}
+	if !m.busy || m.autoAccept || m.autoReviewEnabled {
+		t.Fatalf("unexpected state after third Alt+P: busy=%v autoReview=%v autoAccept=%v", m.busy, m.autoReviewEnabled, m.autoAccept)
 	}
 }
 
