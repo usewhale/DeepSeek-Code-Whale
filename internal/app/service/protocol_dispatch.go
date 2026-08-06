@@ -41,6 +41,7 @@ func (s *Service) DispatchProtocol(in protocol.Intent) {
 		WorkflowSaveAs:     in.WorkflowSaveAs,
 		WorkflowScriptPath: in.WorkflowScriptPath,
 		AutoReview:         in.AutoReview,
+		Quiet:              in.Quiet,
 	})
 }
 

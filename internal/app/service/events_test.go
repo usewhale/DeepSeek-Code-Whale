@@ -1799,6 +1799,63 @@ func TestEnableAutoAcceptIntentDoesNotEndActiveTurn(t *testing.T) {
 	}
 }
 
+func TestQuietPermissionIntentsDoNotEndActiveTurn(t *testing.T) {
+	work := t.TempDir()
+	t.Chdir(work)
+	cfg := app.DefaultConfig()
+	cfg.DataDir = t.TempDir()
+	svc, err := New(t.Context(), cfg, app.StartOptions{NewSession: true})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer svc.Close()
+	waitForServiceEvent(t, svc, EventSessionHydrated)
+
+	// Quiet auto-accept: EventInfo only, no EventTurnDone.
+	svc.Dispatch(Intent{Kind: IntentSetApprovalMode, ApprovalMode: "auto_accept", Quiet: true})
+	info := waitForServiceEvent(t, svc, EventInfo)
+	if info.Text != "Auto-accept edits enabled" || !info.AutoAccept || !info.AutoAcceptKnown {
+		t.Fatalf("unexpected quiet approval mode info: %+v", info)
+	}
+	select {
+	case ev := <-svc.Events():
+		t.Fatalf("quiet approval mode intent should not emit another event, got %+v", ev)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// Quiet auto-review: EventInfo only, no EventTurnDone.
+	svc.Dispatch(Intent{Kind: IntentSetAutoReview, AutoReview: true, Quiet: true})
+	info = waitForServiceEvent(t, svc, EventInfo)
+	if info.Text != "Auto-review enabled" || !info.AutoReview || !info.AutoAcceptKnown {
+		t.Fatalf("unexpected quiet auto review info: %+v", info)
+	}
+	select {
+	case ev := <-svc.Events():
+		t.Fatalf("quiet auto review intent should not emit another event, got %+v", ev)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// Quiet ask: EventInfo only, no EventTurnDone.
+	svc.Dispatch(Intent{Kind: IntentSetApprovalMode, ApprovalMode: "ask", Quiet: true})
+	info = waitForServiceEvent(t, svc, EventInfo)
+	if info.Text != "Ask for approval" || info.AutoAccept || !info.AutoAcceptKnown {
+		t.Fatalf("unexpected quiet ask info: %+v", info)
+	}
+	select {
+	case ev := <-svc.Events():
+		t.Fatalf("quiet ask intent should not emit another event, got %+v", ev)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// Non-quiet intents still end the turn, so the idle Alt+P path is unchanged.
+	svc.Dispatch(Intent{Kind: IntentSetApprovalMode, ApprovalMode: "auto_accept"})
+	info = waitForServiceEvent(t, svc, EventInfo)
+	if info.Text != "Auto-accept edits enabled" {
+		t.Fatalf("unexpected non-quiet approval mode info: %q", info.Text)
+	}
+	waitForServiceEvent(t, svc, EventTurnDone)
+}
+
 func TestReviewCommandOpensMenu(t *testing.T) {
 	t.Setenv("DEEPSEEK_API_KEY", "sk-test")
 	cfg := app.DefaultConfig()
