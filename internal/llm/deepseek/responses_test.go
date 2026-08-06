@@ -233,10 +233,12 @@ func TestResponsesMixedFunctionCallAndSearch(t *testing.T) {
 	// The server-side search call must be recorded for echo on later turns.
 	if got := c.searchCalls.lookup("s2"); len(got) != 1 {
 		t.Fatalf("recorded search calls = %#v, want 1", got)
-	} else if got[0]["id"] != "ws_2" {
+	} else if len(got[0].items) != 1 || got[0].items[0]["id"] != "ws_2" {
 		t.Fatalf("recorded search call = %#v", got[0])
-	} else if got[0]["action"] == nil {
+	} else if got[0].items[0]["action"] == nil {
 		t.Fatalf("recorded search call must keep the full action payload: %#v", got[0])
+	} else if got[0].assistantKey == "" {
+		t.Fatal("recorded search call must be associated with its assistant response")
 	}
 }
 
@@ -254,6 +256,7 @@ func TestResponsesEchoesSearchCallsOnNextTurn(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		if requests == 1 {
+			_, _ = fmt.Fprint(w, "data: {\"type\":\"response.reasoning_text.delta\",\"sequence_number\":0,\"delta\":\"need search\"}\n\n")
 			_, _ = fmt.Fprint(w, "data: {\"type\":\"response.completed\",\"sequence_number\":1,\"response\":{\"id\":\"r1\",\"status\":\"completed\",\"output\":[{\"type\":\"web_search_call\",\"id\":\"ws_9\"},{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"答案是42\"}]}],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n")
 		} else {
 			_, _ = fmt.Fprint(w, "data: {\"type\":\"response.completed\",\"sequence_number\":1,\"response\":{\"id\":\"r2\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"继续\"}]}],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n")
@@ -285,7 +288,7 @@ func TestResponsesEchoesSearchCallsOnNextTurn(t *testing.T) {
 	second := c.StreamResponse(context.Background(),
 		[]core.Message{
 			{SessionID: "s9", Role: core.RoleUser, Text: "搜一下"},
-			{SessionID: "s9", Role: core.RoleAssistant, Text: "答案是42"},
+			{SessionID: "s9", Role: core.RoleAssistant, Text: "答案是42", Reasoning: "need search"},
 			{SessionID: "s9", Role: core.RoleUser, Text: "然后呢"},
 		},
 		[]core.Tool{fakeTool{"web_search"}},
@@ -298,18 +301,30 @@ func TestResponsesEchoesSearchCallsOnNextTurn(t *testing.T) {
 	if requests != 2 {
 		t.Fatalf("requests = %d, want 2", requests)
 	}
-	var foundEcho bool
-	for _, raw := range secondInput {
+	var searchIndex, reasoningIndex, latestUserIndex = -1, -1, -1
+	for i, raw := range secondInput {
 		item, ok := raw.(map[string]any)
 		if !ok {
 			continue
 		}
 		if item["type"] == "web_search_call" && item["id"] == "ws_9" {
-			foundEcho = true
+			searchIndex = i
+		}
+		if item["type"] == "reasoning" {
+			reasoningIndex = i
+		}
+		if item["role"] == "user" {
+			latestUserIndex = i
 		}
 	}
-	if !foundEcho {
+	if searchIndex < 0 {
 		t.Fatalf("second turn input does not echo web_search_call: %#v", secondInput)
+	}
+	if reasoningIndex < 0 || searchIndex != reasoningIndex+1 {
+		t.Fatalf("search call must immediately follow its reasoning: %#v", secondInput)
+	}
+	if latestUserIndex != len(secondInput)-1 {
+		t.Fatalf("latest user must remain the final input item: %#v", secondInput)
 	}
 }
 
@@ -506,14 +521,14 @@ func TestResponsesHistoryInputItems(t *testing.T) {
 		{SessionID: "h1", Role: core.RoleUser, Text: "然后呢"},
 	}
 	items := toResponsesInputItems(history, nil)
-	if len(items) != 8 {
-		t.Fatalf("items = %d, want 8: %#v", len(items), items)
+	if len(items) != 7 {
+		t.Fatalf("items = %d, want 7: %#v", len(items), items)
 	}
 	types := make([]string, len(items))
 	for i, item := range items {
 		types[i], _ = item["type"].(string)
 	}
-	wantTypes := []string{"message", "message", "message", "reasoning", "message", "function_call", "function_call_output", "message"}
+	wantTypes := []string{"message", "message", "message", "message", "function_call", "function_call_output", "message"}
 	if strings.Join(types, ",") != strings.Join(wantTypes, ",") {
 		t.Fatalf("types = %#v, want %#v", types, wantTypes)
 	}
@@ -553,15 +568,107 @@ func TestResponsesHistoryInputItems(t *testing.T) {
 	}
 }
 
-func TestResponsesInputItemsAppendsSearchCalls(t *testing.T) {
+func TestResponsesHistoryDropsFailedReasoningOnlyAssistant(t *testing.T) {
 	history := []core.Message{
-		{SessionID: "h2", Role: core.RoleUser, Text: "搜一下"},
-		{SessionID: "h2", Role: core.RoleAssistant, Text: "答案是42"},
+		{SessionID: "stale", Role: core.RoleUser, Text: "old question"},
+		{SessionID: "stale", Role: core.RoleAssistant, Reasoning: "continue the old task", FinishReason: core.FinishReasonError},
+		{SessionID: "stale", Role: core.RoleUser, Text: "new unrelated question"},
 	}
-	items := toResponsesInputItems(history, []map[string]any{{"type": "web_search_call", "id": "ws_1"}})
+
+	items := toResponsesInputItems(history, nil)
+	if len(items) != 2 {
+		t.Fatalf("items = %d, want only the two user messages: %#v", len(items), items)
+	}
+	for _, item := range items {
+		if item["type"] == "reasoning" {
+			t.Fatalf("failed reasoning-only assistant leaked into provider history: %#v", item)
+		}
+	}
+	lastContent := items[1]["content"].([]map[string]any)
+	if got := lastContent[0]["text"]; got != "new unrelated question" {
+		t.Fatalf("last user input = %#v, want new question", got)
+	}
+}
+
+func TestResponsesHistoryKeepsToolCallReasoning(t *testing.T) {
+	history := []core.Message{
+		{SessionID: "tool-reasoning", Role: core.RoleAssistant, Reasoning: "need the tool", ToolCalls: []core.ToolCall{{ID: "call_1", Name: "shell_run", Input: `{}`}}},
+		{SessionID: "tool-reasoning", Role: core.RoleTool, ToolResults: []core.ToolResult{{ToolCallID: "call_1", Name: "shell_run", ModelText: "ok"}}},
+	}
+
+	items := toResponsesInputItems(history, nil)
+	wantTypes := []string{"reasoning", "function_call", "function_call_output"}
+	if len(items) != len(wantTypes) {
+		t.Fatalf("items = %d, want %d: %#v", len(items), len(wantTypes), items)
+	}
+	for i, want := range wantTypes {
+		if got := items[i]["type"]; got != want {
+			t.Fatalf("item %d type = %#v, want %q", i, got, want)
+		}
+	}
+}
+
+func TestResponsesInputItemsRestoresSearchCallsToOriginatingAssistant(t *testing.T) {
+	assistant := core.Message{
+		SessionID: "h2",
+		Role:      core.RoleAssistant,
+		Text:      "old answer",
+		Reasoning: "searched first",
+	}
+	history := []core.Message{
+		{SessionID: "h2", Role: core.RoleUser, Text: "old search"},
+		assistant,
+		{SessionID: "h2", Role: core.RoleUser, Text: "new unrelated question"},
+	}
+	replays := []webSearchCallReplay{{
+		assistantKey: responsesAssistantReplayKey(assistant.Text, assistant.Reasoning, nil),
+		items:        []map[string]any{{"type": "web_search_call", "id": "ws_1"}},
+	}}
+	items := toResponsesInputItems(history, replays)
+	if len(items) != 5 {
+		t.Fatalf("items = %d, want 5: %#v", len(items), items)
+	}
+	search := items[len(items)-2]
+	if search["type"] != "web_search_call" || search["id"] != "ws_1" {
+		t.Fatalf("penultimate item = %#v, want echoed web_search_call", search)
+	}
 	last := items[len(items)-1]
-	if last["type"] != "web_search_call" || last["id"] != "ws_1" {
-		t.Fatalf("last item = %#v, want echoed web_search_call", last)
+	if last["role"] != "user" {
+		t.Fatalf("last item = %#v, want latest user message", last)
+	}
+	content := last["content"].([]map[string]any)
+	if got := content[0]["text"]; got != "new unrelated question" {
+		t.Fatalf("last user input = %#v, want new question", got)
+	}
+}
+
+func TestResponsesInputItemsKeepsSearchAndFunctionCallsInReasoningGroup(t *testing.T) {
+	assistant := core.Message{
+		SessionID: "mixed",
+		Role:      core.RoleAssistant,
+		Text:      "I searched and need to fetch details.",
+		Reasoning: "search before fetching",
+		ToolCalls: []core.ToolCall{{ID: "call_1", Name: "fetch", Input: `{"url":"https://example.com"}`}},
+	}
+	history := []core.Message{
+		{SessionID: "mixed", Role: core.RoleUser, Text: "research prices"},
+		assistant,
+		{SessionID: "mixed", Role: core.RoleTool, ToolResults: []core.ToolResult{{ToolCallID: "call_1", Name: "fetch", ModelText: "price details"}}},
+	}
+	replays := []webSearchCallReplay{{
+		assistantKey: responsesAssistantReplayKey(assistant.Text, assistant.Reasoning, assistant.ToolCalls),
+		items:        []map[string]any{{"type": "web_search_call", "id": "ws_mixed"}},
+	}}
+
+	items := toResponsesInputItems(history, replays)
+	wantTypes := []string{"message", "message", "reasoning", "web_search_call", "function_call", "function_call_output"}
+	if len(items) != len(wantTypes) {
+		t.Fatalf("items = %d, want %d: %#v", len(items), len(wantTypes), items)
+	}
+	for i, want := range wantTypes {
+		if got := items[i]["type"]; got != want {
+			t.Fatalf("item %d type = %#v, want %q; items=%#v", i, got, want, items)
+		}
 	}
 }
 
