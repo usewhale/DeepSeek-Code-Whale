@@ -117,9 +117,9 @@ model = "gpt-4o"
 
 这个 override 只用于带附件的 turn，例如 `whale exec --attach screen.png "describe this"`，或者在 TUI 里粘贴图片/本地图片路径后提交的 prompt。普通纯文本 turn 仍使用常规 DeepSeek 配置。DeepSeek 多模态公开可用后，把 `base_url`、`api_key_env` 和 `model` 指回 DeepSeek 兼容值即可。
 
-### 服务端联网搜索（Responses API）
+### 联网搜索 —— 搜索在哪里执行
 
-DeepSeek 在 Responses API 里内置了服务端执行的联网搜索：不需要第三方搜索密钥，搜索在 DeepSeek 服务器上完成并直接喂给模型。目前**仅 `deepseek-v4-flash` 模型**支持。
+`web_search` 设置决定搜索**在哪里执行**：在 Whale 的工具系统内（`local`），还是在 DeepSeek 服务器上（`server`）。它**不**选择 API 传输通道 —— 那是独立的 `api` 开关（见下一节）。`server` 搜索是 DeepSeek Responses API 的一部分：不需要第三方搜索密钥，搜索在 DeepSeek 服务器上完成并直接喂给模型。目前**仅 `deepseek-v4-flash` 模型**支持服务端搜索。
 
 ```toml
 # 默认（不配置时）deepseek-v4-flash 就使用服务端内置搜索：
@@ -129,8 +129,8 @@ model = "deepseek-v4-flash"
 ```
 
 - `auto`（**默认**，不配置即此行为）：模型是 `deepseek-v4-flash` 时走 `server`，其他模型走 `local`。
-- `local`：现有行为不变。`web_search` 是 Whale 本地工具（DuckDuckGo + Bing 回退），由工具系统执行。
-- `server`：强制改用 DeepSeek Responses API，把本地 `web_search` 工具翻译为服务端内置搜索。模型直接在同一轮响应里带着搜索结果作答，不经过本地工具分发。若模型不是 `deepseek-v4-flash`，自动降级为 `local` 行为（不会报错）。
+- `local`：搜索在 Whale 工具系统内执行 —— 本地 `web_search` 工具（DuckDuckGo + Bing 回退），由工具系统执行。
+- `server`：搜索在 DeepSeek 服务器上通过 Responses API 执行，结果在同一轮响应里直接并入模型回答；不做本地工具分发。需要 Responses API 传输通道：如果传输通道被显式设为 `chat_completions`，则 `server` 降级为 `local` 并给出警告 —— 绝不会拒绝启动。
 
 注意事项：
 
@@ -138,6 +138,21 @@ model = "deepseek-v4-flash"
 - 搜索上下文（`web_search_call` item）保存在进程内，重启后会话恢复时会重新搜索（结果仍然正确，只是多花一次搜索）。
 - `server` 模式下思考关闭时请求会显式传 `reasoning.effort = "none"`（Responses API 默认开启思考）。
 - 带附件的 turn 仍然走多模态通道，不受 `web_search = "server"` 影响。
+
+### API 传输通道 —— Responses API 与 chat completions
+
+Whale 通过两种传输通道之一与 DeepSeek 通信：**Responses API**（`POST /responses`）或 **chat completions API**（`POST /chat/completions`）。`api` 设置显式选择传输通道；模型仍然决定负载格式，两者解耦。`api` 是传输通道的权威 —— `web_search = "server"` 充其量是"正在使用 Responses API"的一种推断，因此它可以推导出 Responses API，但绝不能覆盖显式的 `chat_completions` 选择。
+
+```toml
+[providers.deepseek]
+api = "auto"   # auto(默认) | responses | chat_completions
+```
+
+- `auto`（**默认**，不配置即此行为）：传输通道由模型推断 —— `deepseek-v4-flash` 使用 Responses API，`web_search = "server"` 也推导为 Responses API；其他情况使用 chat completions。
+- `responses`：任何模型都使用 Responses API。`web_search` 的含义不变：设为 `local` 时，搜索仍在 Whale 工具系统内、在 Responses 传输通道上执行；设为 `server`/`auto` 时使用 DeepSeek 内置搜索。
+- `chat_completions`：任何模型都使用 chat completions。如果同时设置了 `web_search = "server"`，冲突通过把 `web_search` 降级为 `local` 并给出警告解决 —— 绝不会拒绝启动。
+
+同样的选择也可以通过 `WHALE_API` 环境变量设置（`responses` | `chat_completions` | `auto`）；环境变量优先于配置文件。ACP 入口（`whale-acp`，Zed 运行的 agent）直接读取 `WHALE_API` —— 它不读取 `config.toml` 的 provider 设置。
 
 ---
 
@@ -205,6 +220,10 @@ enabled = true                         # 每个插件单独配置启用状态
 [experimental]
 deepseek_prefix_completion = false     # DeepSeek Prefix completion（实验功能）
 
+[providers.deepseek]
+web_search = "auto"                    # 搜索在哪里执行：local | server | auto
+api = "auto"                           # API 传输通道：responses | chat_completions | auto
+
 [providers.deepseek.multimodal]
 enabled = false                        # 将带附件的 turn 路由到 OpenAI-compatible 多模态 endpoint
 compat = "openai"
@@ -224,6 +243,19 @@ level = "info"                         # debug | info | warn | error
 | `WHALE_HOME` | 全局数据目录（`~/.whale`） |
 | `HTTP_PROXY` / `HTTPS_PROXY` | 配置中的代理设置 |
 | `WHALE_MCP_CONFIG` | MCP 配置文件路径 |
+| `WHALE_API` | API 传输通道（`responses` \| `chat_completions` \| `auto`）；环境变量优先于配置文件 |
+
+以下变量适用于 ACP 入口（`whale-acp`，Zed 运行的 agent）。它们在进程启动时读取一次 —— 修改后需要重启 agent 进程：
+
+| 变量 | 覆盖内容 |
+|---|---|
+| `WHALE_MODEL` | 模型名（校验必须属于受支持集合；默认 `deepseek-v4-flash`） |
+| `WHALE_API` | API 传输通道（`responses` \| `chat_completions` \| `auto`） |
+| `WHALE_COMPACT_THRESHOLD` | 自动压缩触发阈值（上下文窗口的比例，例如 `0.85`） |
+| `WHALE_CONTEXT_WINDOW` | 上下文窗口覆盖（token 数；默认由模型推导，V4 模型为 1M） |
+| `WHALE_MAX_TOOL_ITERS` | 每轮工具迭代上限（默认 `300`） |
+
+自动压缩按 token 数计算，而不是按成本：大量命中的缓存前缀成本几乎为零，但仍然占用窗口，因此大型缓存会话与未缓存会话一样会在越界时被压缩。
 
 ### 工作目录（Worktree）
 

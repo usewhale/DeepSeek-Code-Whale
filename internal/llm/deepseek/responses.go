@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -40,6 +41,69 @@ const (
 	responsesCapableModelPrefix = "deepseek-v4-flash"
 )
 
+// API selects which DeepSeek endpoint the client speaks: the Responses API
+// (POST /responses) or the chat completions API (POST /chat/completions).
+// The API is a transport property, decoupled from the model: the model still
+// picks the payload shape, but the API picks where it is sent.
+type API string
+
+const (
+	// APIAuto (the zero value) infers the transport from the model name (and
+	// web_search mode): deepseek-v4-flash uses the Responses API, any other
+	// model uses chat completions.
+	APIAuto API = ""
+	// APIResponses forces the Responses API (POST /responses) for any model.
+	APIResponses API = "responses"
+	// APIChatCompletions forces the chat completions API
+	// (POST /chat/completions) for any model.
+	APIChatCompletions API = "chat_completions"
+)
+
+// NormalizeAPI parses and validates an API selection string. Exactly three
+// values are accepted — "responses", "chat_completions", "auto" — plus the
+// empty string, which normalizes to APIAuto. Anything else is an error: there
+// is no bare /completions endpoint (only /responses and /chat/completions),
+// so aliases like "completions" or "chat" would name nothing and re-introduce
+// the silent model-name fallback this selection deletes. One canonical
+// spelling per value, no synonyms.
+func NormalizeAPI(v string) (API, error) {
+	switch API(strings.ToLower(strings.TrimSpace(v))) {
+	case "", "auto":
+		return APIAuto, nil
+	case APIResponses:
+		return APIResponses, nil
+	case APIChatCompletions:
+		return APIChatCompletions, nil
+	default:
+		return APIAuto, fmt.Errorf("invalid api %q: must be \"responses\", \"chat_completions\", or \"auto\"", v)
+	}
+}
+
+// ResolveTransport reconciles an explicit API selection with the web_search
+// mode. The api knob is the transport authority: web_search = "server" is at
+// best an inference that the Responses API is in use, so it can imply the
+// Responses API but never overrides an explicit chat_completions choice. The
+// one conflict — explicit chat completions plus server-side search — degrades
+// web_search to local with a warning rather than refusing to start (matching
+// the codebase's existing soft-degrade precedent). The returned warning is
+// empty when no adjustment was needed.
+func ResolveTransport(api API, webSearch WebSearchMode) (API, WebSearchMode, string) {
+	switch api {
+	case APIChatCompletions:
+		if webSearch == WebSearchModeServer {
+			return api, WebSearchModeLocal, "web_search=\"server\" requires the Responses API; degrading to web_search=\"local\" because the API is \"chat_completions\""
+		}
+		return api, webSearch, ""
+	case APIAuto:
+		if webSearch == WebSearchModeServer {
+			return APIResponses, webSearch, ""
+		}
+		return api, webSearch, ""
+	default:
+		return api, webSearch, ""
+	}
+}
+
 // NormalizeWebSearchMode parses and validates a web search mode string. An
 // empty value normalizes to WebSearchModeAuto: deepseek-v4-flash uses
 // DeepSeek's server-side search out of the box, other models keep the local
@@ -58,10 +122,18 @@ func NormalizeWebSearchMode(v string) (WebSearchMode, error) {
 }
 
 // responsesEnabled reports whether the client should use the Responses API
-// backend for the current turn. The zero value (unset) behaves like auto: the
-// Responses API is used whenever the model supports it (deepseek-v4-flash),
-// and server mode degrades softly to chat completions for other models.
+// backend for the current turn. An explicit api selection is the transport
+// authority and wins unconditionally; the zero value (auto) falls back to the
+// model-name heuristic, with web_search mode still governing: local search
+// forces chat completions, server/auto use the Responses API when the model
+// supports it.
 func (c *Client) responsesEnabled() bool {
+	switch c.api {
+	case APIResponses:
+		return true
+	case APIChatCompletions:
+		return false
+	}
 	switch c.webSearchMode {
 	case WebSearchModeServer, WebSearchModeAuto, "":
 		return isResponsesCapableModel(c.model)
@@ -143,7 +215,7 @@ func (c *Client) streamResponses(ctx context.Context, history []core.Message, to
 		},
 	}
 	if len(tools) > 0 {
-		payload["tools"] = toResponsesTools(tools)
+		payload["tools"] = toResponsesTools(tools, c.webSearchMode == WebSearchModeLocal)
 		payload["tool_choice"] = "auto"
 	}
 	if c.maxTokens > 0 {
@@ -169,17 +241,38 @@ func (c *Client) responsesReasoningEffort() string {
 	return "high"
 }
 
-// toResponsesTools translates Whale's tool list to Responses API tools: the
-// local web_search function becomes the server-side built-in tool, everything
-// else stays a regular function tool. Note the Responses API uses the OpenAI
-// Responses function shape (name at the top level) rather than the chat
-// completions shape (name nested under function).
-func toResponsesTools(tools []core.Tool) []map[string]any {
+// toResponsesTools translates Whale's tool list to Responses API tools. The
+// Responses API uses the OpenAI Responses function shape (name at the top
+// level) rather than the chat completions shape (name nested under function).
+//
+// The web_search tool is mode-dependent: in server/auto mode it becomes the
+// server-side built-in tool; in local mode it stays a regular function tool so
+// Whale's tool system executes it (DuckDuckGo/Bing) and feeds the result back
+// — local search on the Responses transport, matching the chat-completions
+// path. Previously toResponsesTools always translated web_search to the
+// built-in, which silently turned "local" search into server-side search as
+// soon as the transport was explicitly set to responses.
+func toResponsesTools(tools []core.Tool, localWebSearch bool) []map[string]any {
 	out := make([]map[string]any, 0, len(tools)+1)
 	hasWebSearch := false
 	for _, t := range tools {
 		if strings.TrimSpace(t.Name()) == "web_search" {
-			hasWebSearch = true
+			if localWebSearch {
+				// Keep it as a regular function tool: the tool registry runs
+				// the local search and the result returns as
+				// function_call_output, exactly like the chat-completions path.
+				spec := core.DescribeTool(t)
+				if strings.TrimSpace(spec.Name) != "" {
+					out = append(out, map[string]any{
+						"type":        "function",
+						"name":        core.DisplayToolName(spec.Name),
+						"description": core.ApplyDisplayToolNames(spec.Description),
+						"parameters":  core.FlattenSchemaForModel(spec.Parameters),
+					})
+				}
+			} else {
+				hasWebSearch = true
+			}
 			continue
 		}
 		spec := core.DescribeTool(t)
@@ -581,20 +674,39 @@ func parseResponsesData(data, model, sessionID string, acc *responsesAccumulator
 			}
 			out <- llm.ProviderEvent{Type: llm.EventToolUseStart, ToolCall: &core.ToolCall{ID: st.id, Name: st.name}}
 		}
-	case "response.completed", "response.incomplete", "response.failed":
+	case "response.failed":
 		resp := frame.Response
 		if resp == nil {
 			return true, progressed, errors.New("responses stream ended without a response payload")
 		}
-		if resp.Status == "failed" {
-			// Terminal and non-retryable: the server reported a definitive
-			// failure; re-issuing the same request would fail again.
-			return true, progressed, &responsesTerminalError{msg: "deepseek responses request failed: " + responsesStatusDetail(resp)}
+		// Terminal and non-retryable: the server reported a definitive
+		// failure; re-issuing the same request would fail again.
+		return true, progressed, &responsesTerminalError{msg: "deepseek responses request failed: " + responsesStatusDetail(resp)}
+
+	case "response.incomplete":
+		// Server-side truncation. The payload is NOT authoritative: deltas may
+		// have streamed tool calls the truncated output omits, and the
+		// chat-completions path retries this class (errIncompleteStream).
+		// Mirror it — retryable stream error, never a clean end_turn with the
+		// accumulated calls dropped.
+		return false, progressed, errIncompleteStream
+
+	case "response.completed":
+		resp := frame.Response
+		if resp == nil {
+			return true, progressed, errors.New("responses stream ended without a response payload")
 		}
 		// The completed payload is the authoritative output: deltas may have
 		// been sparse or absent.
 		content := responsesOutputText(resp.Output)
 		calls := responsesFunctionCalls(resp.Output)
+		if len(calls) == 0 && len(acc.callsByIndex) > 0 {
+			// Sparse terminal payload: it omitted the function_call items the
+			// deltas already streamed. Keep the accumulated calls instead of
+			// dropping them (previously this emitted a clean end_turn with the
+			// planned tool call silently discarded).
+			calls = responsesAccumulatedCalls(acc.callsByIndex)
+		}
 		if content != "" {
 			acc.content.Reset()
 			acc.content.WriteString(content)
@@ -709,6 +821,28 @@ func responsesOutputText(output []map[string]any) string {
 // responsesFunctionCalls extracts function_call items from a completed
 // response's output list, normalizing tool names back to Whale's internal
 // names (mirrors the chat completions path).
+// responsesAccumulatedCalls converts the delta-accumulated call states back
+// to ToolCalls ordered by output index. Used when the terminal payload omits
+// the function_call items (sparse/truncated output) so delta-streamed calls
+// survive instead of being dropped.
+func responsesAccumulatedCalls(byIndex map[int]*responsesCallState) []core.ToolCall {
+	indices := make([]int, 0, len(byIndex))
+	for idx := range byIndex {
+		indices = append(indices, idx)
+	}
+	sort.Ints(indices)
+	calls := make([]core.ToolCall, 0, len(indices))
+	for _, idx := range indices {
+		st := byIndex[idx]
+		calls = append(calls, core.ToolCall{
+			ID:    st.id,
+			Name:  core.CanonicalToolName(st.name),
+			Input: st.arguments.String(),
+		})
+	}
+	return calls
+}
+
 func responsesFunctionCalls(output []map[string]any) []core.ToolCall {
 	var calls []core.ToolCall
 	for _, item := range output {

@@ -12,6 +12,8 @@ import (
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/usewhale/whale/internal/acp"
 	"github.com/usewhale/whale/internal/core"
+	"github.com/usewhale/whale/internal/defaults"
+	"github.com/usewhale/whale/internal/llm/deepseek"
 	whalemcp "github.com/usewhale/whale/internal/mcp"
 	"github.com/usewhale/whale/internal/tools"
 )
@@ -314,5 +316,192 @@ func TestWireMCPServersFailedServerNoCatalog(t *testing.T) {
 	states := mgr.States()
 	if len(states) != 1 || states[0].Status != whalemcp.StatusFailed {
 		t.Fatalf("expected one failed server state, got %+v", states)
+	}
+}
+
+func TestModelFromEnv(t *testing.T) {
+	t.Run("default when unset", func(t *testing.T) {
+		t.Setenv("WHALE_MODEL", "")
+		m, err := modelFromEnv()
+		if err != nil {
+			t.Fatalf("modelFromEnv: %v", err)
+		}
+		if m != defaults.DefaultModel {
+			t.Fatalf("model = %q, want default %q", m, defaults.DefaultModel)
+		}
+	})
+	t.Run("valid override", func(t *testing.T) {
+		t.Setenv("WHALE_MODEL", defaults.ProModel)
+		m, err := modelFromEnv()
+		if err != nil {
+			t.Fatalf("modelFromEnv: %v", err)
+		}
+		if m != defaults.ProModel {
+			t.Fatalf("model = %q, want %q", m, defaults.ProModel)
+		}
+	})
+	t.Run("retired chat alias rejected", func(t *testing.T) {
+		t.Setenv("WHALE_MODEL", "deepseek-chat")
+		if _, err := modelFromEnv(); err == nil || !strings.Contains(err.Error(), "unsupported model") {
+			t.Fatalf("err = %v, want unsupported model error", err)
+		}
+	})
+	t.Run("mixed case canonicalized", func(t *testing.T) {
+		// IsSupportedModel matches case-insensitively, but the returned name
+		// feeds the provider, the window derivation (case-insensitive) AND the
+		// transport inference (case-sensitive prefix). A non-canonical name
+		// would make window (1M) and transport (chat completions) disagree and
+		// send a non-canonical slug to the API — so the canonical lowercase
+		// slug must be returned.
+		for _, in := range []string{"DeepSeek-V4-Flash", " DEEPSEEK-V4-PRO ", "DeepSeek-V4-FLASH"} {
+			t.Setenv("WHALE_MODEL", in)
+			m, err := modelFromEnv()
+			if err != nil {
+				t.Fatalf("modelFromEnv(%q): %v", in, err)
+			}
+			want := strings.ToLower(strings.TrimSpace(in))
+			if m != want {
+				t.Fatalf("modelFromEnv(%q) = %q, want canonical %q", in, m, want)
+			}
+		}
+	})
+}
+
+func TestAPIFromEnv(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		env   string
+		want  deepseek.API
+		error bool
+	}{
+		{name: "unset", env: "", want: deepseek.APIAuto},
+		{name: "responses", env: "responses", want: deepseek.APIResponses},
+		{name: "chat_completions", env: "chat_completions", want: deepseek.APIChatCompletions},
+		{name: "auto", env: "auto", want: deepseek.APIAuto},
+		{name: "alias rejected", env: "completions", error: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("WHALE_API", tc.env)
+			got, err := apiFromEnv()
+			if tc.error {
+				if err == nil {
+					t.Fatalf("apiFromEnv(%q): expected error", tc.env)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("apiFromEnv(%q): %v", tc.env, err)
+			}
+			if got != tc.want {
+				t.Fatalf("apiFromEnv(%q) = %q, want %q", tc.env, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestMaxToolItersFromEnv(t *testing.T) {
+	t.Run("default 300 when unset", func(t *testing.T) {
+		t.Setenv("WHALE_MAX_TOOL_ITERS", "")
+		got, err := maxToolItersFromEnv()
+		if err != nil {
+			t.Fatalf("maxToolItersFromEnv: %v", err)
+		}
+		if got != defaults.DefaultMaxToolIters {
+			t.Fatalf("got %d, want %d", got, defaults.DefaultMaxToolIters)
+		}
+	})
+	t.Run("explicit override", func(t *testing.T) {
+		t.Setenv("WHALE_MAX_TOOL_ITERS", "450")
+		got, err := maxToolItersFromEnv()
+		if err != nil {
+			t.Fatalf("maxToolItersFromEnv: %v", err)
+		}
+		if got != 450 {
+			t.Fatalf("got %d, want 450", got)
+		}
+	})
+	t.Run("zero rejected (cap must stay finite)", func(t *testing.T) {
+		t.Setenv("WHALE_MAX_TOOL_ITERS", "0")
+		if _, err := maxToolItersFromEnv(); err == nil {
+			t.Fatal("expected error for 0 cap")
+		}
+	})
+	t.Run("negative rejected", func(t *testing.T) {
+		t.Setenv("WHALE_MAX_TOOL_ITERS", "-5")
+		if _, err := maxToolItersFromEnv(); err == nil {
+			t.Fatal("expected error for negative cap")
+		}
+	})
+	t.Run("non-numeric rejected", func(t *testing.T) {
+		t.Setenv("WHALE_MAX_TOOL_ITERS", "lots")
+		if _, err := maxToolItersFromEnv(); err == nil {
+			t.Fatal("expected error for non-numeric cap")
+		}
+	})
+}
+
+func TestCompactThresholdFromEnv(t *testing.T) {
+	t.Run("default 0.85 when unset", func(t *testing.T) {
+		t.Setenv("WHALE_COMPACT_THRESHOLD", "")
+		got, err := compactThresholdFromEnv()
+		if err != nil {
+			t.Fatalf("compactThresholdFromEnv: %v", err)
+		}
+		if got != defaults.DefaultAutoCompactThreshold {
+			t.Fatalf("got %v, want %v (CLI parity, not the agent's 0.90)", got, defaults.DefaultAutoCompactThreshold)
+		}
+	})
+	t.Run("explicit override", func(t *testing.T) {
+		t.Setenv("WHALE_COMPACT_THRESHOLD", "0.7")
+		got, err := compactThresholdFromEnv()
+		if err != nil {
+			t.Fatalf("compactThresholdFromEnv: %v", err)
+		}
+		if got != 0.7 {
+			t.Fatalf("got %v, want 0.7", got)
+		}
+	})
+	// NaN must be rejected: it satisfies neither f <= 0 nor f >= 1, so a bare
+	// range check would accept it and WithAutoCompact's threshold guard would
+	// then silently keep the agent's 0.90 default — the trap this knob exists
+	// to avoid. Infinities must be rejected too.
+	for _, bad := range []string{"0", "1", "1.5", "-0.2", "abc", "NaN", "nan", "+Inf", "-Inf", "Inf"} {
+		t.Run("reject "+bad, func(t *testing.T) {
+			t.Setenv("WHALE_COMPACT_THRESHOLD", bad)
+			if _, err := compactThresholdFromEnv(); err == nil {
+				t.Fatalf("expected error for threshold %q", bad)
+			}
+		})
+	}
+}
+
+func TestContextWindowFromEnv(t *testing.T) {
+	t.Run("unset returns 0 (model-derived)", func(t *testing.T) {
+		t.Setenv("WHALE_CONTEXT_WINDOW", "")
+		got, err := contextWindowFromEnv()
+		if err != nil {
+			t.Fatalf("contextWindowFromEnv: %v", err)
+		}
+		if got != 0 {
+			t.Fatalf("got %d, want 0", got)
+		}
+	})
+	t.Run("explicit override", func(t *testing.T) {
+		t.Setenv("WHALE_CONTEXT_WINDOW", "512000")
+		got, err := contextWindowFromEnv()
+		if err != nil {
+			t.Fatalf("contextWindowFromEnv: %v", err)
+		}
+		if got != 512000 {
+			t.Fatalf("got %d, want 512000", got)
+		}
+	})
+	for _, bad := range []string{"0", "-1", "x", "1.5"} {
+		t.Run("reject "+bad, func(t *testing.T) {
+			t.Setenv("WHALE_CONTEXT_WINDOW", bad)
+			if _, err := contextWindowFromEnv(); err == nil {
+				t.Fatalf("expected error for window %q", bad)
+			}
+		})
 	}
 }

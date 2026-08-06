@@ -159,6 +159,87 @@ func TestResponsesWebSearchServerMode(t *testing.T) {
 	}
 }
 
+// TestResponsesWebSearchLocalModeOnResponsesTransport locks the Phase 1b
+// compat rule "api = responses + web_search = local → Responses API with local
+// search": when the transport is explicitly the Responses API but search is
+// local, the web_search tool must stay a regular function tool (executed by
+// Whale's tool system) — NOT be translated to the server-side built-in, which
+// would silently turn "local" search into server-side search.
+func TestResponsesWebSearchLocalModeOnResponsesTransport(t *testing.T) {
+	var gotPayload map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotPayload); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"response.output_text.delta\",\"sequence_number\":3,\"delta\":\"local\"}\n\n")
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"response.completed\",\"sequence_number\":5,\"response\":{\"id\":\"resp_local\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"local\"}]}],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n")
+	}))
+	defer srv.Close()
+
+	_ = os.Setenv("DEEPSEEK_API_KEY", "test-key")
+	c, err := New(
+		WithBaseURL(srv.URL),
+		WithHTTPClient(srv.Client()),
+		WithModel("deepseek-v4-flash"),
+		WithThinking(false),
+		WithAPI(APIResponses),
+		WithWebSearchMode(WebSearchModeLocal),
+	)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	events := c.StreamResponse(context.Background(),
+		[]core.Message{{SessionID: "s1", Role: core.RoleUser, Text: "用本地搜索查一下"}},
+		[]core.Tool{fakeTool{"web_search"}, fakeTool{"shell_run"}},
+	)
+	for ev := range events {
+		if ev.Type == llm.EventError {
+			t.Fatalf("provider error: %v", ev.Err)
+		}
+	}
+
+	if gotPayload == nil {
+		t.Fatal("missing request payload")
+	}
+	tools, _ := gotPayload["tools"].([]any)
+	if len(tools) == 0 {
+		t.Fatal("expected tools in payload")
+	}
+	var sawBuiltinSearch bool
+	var sawLocalFunctionSearch bool
+	var sawShellRun bool
+	for _, raw := range tools {
+		tool, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		switch tool["type"] {
+		case "web_search":
+			sawBuiltinSearch = true
+		case "function":
+			// Display names: core.DisplayToolName maps web_search → WebSearch,
+			// shell_run → Bash.
+			switch tool["name"] {
+			case "WebSearch":
+				sawLocalFunctionSearch = true
+			case "Bash":
+				sawShellRun = true
+			}
+		}
+	}
+	if sawBuiltinSearch {
+		t.Fatal("web_search=local must NOT be translated to the server-side built-in on the Responses transport")
+	}
+	if !sawLocalFunctionSearch {
+		t.Fatalf("web_search=local must stay a regular function tool on the Responses transport, tools = %#v", gotPayload["tools"])
+	}
+	if !sawShellRun {
+		t.Fatalf("other function tools must still be declared, tools = %#v", gotPayload["tools"])
+	}
+}
+
 func TestResponsesMixedFunctionCallAndSearch(t *testing.T) {
 	var gotPayload map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -399,7 +480,9 @@ func TestResponsesModeRouting(t *testing.T) {
 }
 
 func TestResponsesFailedEvent(t *testing.T) {
+	var requests int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = fmt.Fprint(w, "data: {\"type\":\"response.failed\",\"sequence_number\":1,\"response\":{\"id\":\"r\",\"status\":\"failed\"}}\n\n")
 	}))
@@ -430,6 +513,9 @@ func TestResponsesFailedEvent(t *testing.T) {
 	}
 	if !strings.Contains(gotErr.Error(), "failed") {
 		t.Fatalf("error = %v", gotErr)
+	}
+	if requests != 1 {
+		t.Fatalf("requests = %d, want 1 (response.failed is terminal, not retried)", requests)
 	}
 }
 
@@ -707,5 +793,419 @@ func TestResponsesPrefixCompletionDegrades(t *testing.T) {
 	}
 	if len(paths) != 1 || paths[0] != responsesEndpointPath {
 		t.Fatalf("paths = %#v, want responses endpoint only (prefix degrades)", paths)
+	}
+}
+
+func TestNormalizeAPI(t *testing.T) {
+	for _, tc := range []struct {
+		in   string
+		want API
+		err  bool
+	}{
+		{in: "", want: APIAuto},
+		{in: "auto", want: APIAuto},
+		{in: "AUTO", want: APIAuto},
+		{in: "responses", want: APIResponses},
+		{in: "Responses", want: APIResponses},
+		{in: "chat_completions", want: APIChatCompletions},
+		{in: "CHAT_COMPLETIONS", want: APIChatCompletions},
+		// Strict grammar: aliases that name no real endpoint must fail, not
+		// silently fall back to the model-name heuristic.
+		{in: "completions", err: true},
+		{in: "chat", err: true},
+		{in: "resp", err: true},
+		{in: "responses_api", err: true},
+		{in: "bogus", err: true},
+	} {
+		got, err := NormalizeAPI(tc.in)
+		if tc.err {
+			if err == nil {
+				t.Fatalf("NormalizeAPI(%q): expected error", tc.in)
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatalf("NormalizeAPI(%q): %v", tc.in, err)
+		}
+		if got != tc.want {
+			t.Fatalf("NormalizeAPI(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestResolveTransportCompatRules(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		api       API
+		webSearch WebSearchMode
+		wantAPI   API
+		wantWeb   WebSearchMode
+		wantWarn  bool
+	}{
+		{name: "auto+server implies responses", api: APIAuto, webSearch: WebSearchModeServer, wantAPI: APIResponses, wantWeb: WebSearchModeServer},
+		{name: "auto+local stays auto", api: APIAuto, webSearch: WebSearchModeLocal, wantAPI: APIAuto, wantWeb: WebSearchModeLocal},
+		{name: "auto+unset stays auto", api: APIAuto, webSearch: "", wantAPI: APIAuto, wantWeb: ""},
+		{name: "responses+server keeps server", api: APIResponses, webSearch: WebSearchModeServer, wantAPI: APIResponses, wantWeb: WebSearchModeServer},
+		{name: "responses+local keeps local", api: APIResponses, webSearch: WebSearchModeLocal, wantAPI: APIResponses, wantWeb: WebSearchModeLocal},
+		{name: "responses+unset stays responses", api: APIResponses, webSearch: "", wantAPI: APIResponses, wantWeb: ""},
+		{name: "chat_completions+server degrades to local with warning", api: APIChatCompletions, webSearch: WebSearchModeServer, wantAPI: APIChatCompletions, wantWeb: WebSearchModeLocal, wantWarn: true},
+		{name: "chat_completions+local unchanged", api: APIChatCompletions, webSearch: WebSearchModeLocal, wantAPI: APIChatCompletions, wantWeb: WebSearchModeLocal},
+		{name: "chat_completions+unset unchanged", api: APIChatCompletions, webSearch: "", wantAPI: APIChatCompletions, wantWeb: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gotAPI, gotWeb, warn := ResolveTransport(tc.api, tc.webSearch)
+			if gotAPI != tc.wantAPI {
+				t.Fatalf("api = %q, want %q", gotAPI, tc.wantAPI)
+			}
+			if gotWeb != tc.wantWeb {
+				t.Fatalf("web_search = %q, want %q", gotWeb, tc.wantWeb)
+			}
+			if (warn != "") != tc.wantWarn {
+				t.Fatalf("warn = %q, want warn=%v", warn, tc.wantWarn)
+			}
+		})
+	}
+}
+
+func newClientWithTransport(t *testing.T, model string, opts ...Option) *Client {
+	t.Helper()
+	all := append([]Option{WithAPIKey("test-key"), WithModel(model)}, opts...)
+	c, err := New(all...)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	return c
+}
+
+func TestResponsesEnabledAPIEnum(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		model     string
+		api       API
+		webSearch WebSearchMode
+		want      bool
+	}{
+		// Explicit APIResponses wins for ANY model, including the retired
+		// chat alias the ACP entrypoint used to hardcode.
+		{name: "responses+v4 flash", model: "deepseek-v4-flash", api: APIResponses, want: true},
+		{name: "responses+retired chat alias", model: "deepseek-chat", api: APIResponses, want: true},
+		{name: "responses+local search", model: "deepseek-v4-flash", api: APIResponses, webSearch: WebSearchModeLocal, want: true},
+		// Explicit APIChatCompletions wins for ANY model, including capable ones.
+		{name: "chat_completions+v4 flash", model: "deepseek-v4-flash", api: APIChatCompletions, want: false},
+		{name: "chat_completions+chat alias", model: "deepseek-chat", api: APIChatCompletions, want: false},
+		// Auto falls back to the model heuristic + web_search mode.
+		{name: "auto+v4 flash", model: "deepseek-v4-flash", api: APIAuto, want: true},
+		{name: "auto+chat alias", model: "deepseek-chat", api: APIAuto, want: false},
+		{name: "auto+v4 flash+local search", model: "deepseek-v4-flash", api: APIAuto, webSearch: WebSearchModeLocal, want: false},
+		{name: "auto+v4 flash+server search", model: "deepseek-v4-flash", api: APIAuto, webSearch: WebSearchModeServer, want: true},
+		{name: "unset api+v4 flash", model: "deepseek-v4-flash", want: true},
+		{name: "unset api+chat alias", model: "deepseek-chat", want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newClientWithTransport(t, tc.model, WithAPI(tc.api), WithWebSearchMode(tc.webSearch))
+			if got := c.responsesEnabled(); got != tc.want {
+				t.Fatalf("responsesEnabled() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestWithAPIRejectsEmptySelection(t *testing.T) {
+	// WithAPI must ignore an empty/auto value so the zero value cannot
+	// override a model-name inference.
+	c := newClientWithTransport(t, "deepseek-v4-flash")
+	if c.api != APIAuto {
+		t.Fatalf("api = %q, want APIAuto", c.api)
+	}
+	WithAPI(APIAuto)(c)
+	if c.api != APIAuto {
+		t.Fatalf("WithAPI(APIAuto) set api = %q, want APIAuto preserved", c.api)
+	}
+	WithAPI(APIChatCompletions)(c)
+	if c.api != APIChatCompletions {
+		t.Fatalf("WithAPI(APIChatCompletions) did not set api, got %q", c.api)
+	}
+}
+
+func TestWithAPINormalizesWhitespaceAndCase(t *testing.T) {
+	// WithAPI must normalize like WithReasoningEffort: a raw " RESPONSES "
+	// (spaces, wrong case) must not silently miss responsesEnabled's exact
+	// match and fall back to the model heuristic.
+	c := newClientWithTransport(t, "deepseek-v4-flash", WithAPI(" RESPONSES "))
+	if c.api != APIResponses {
+		t.Fatalf("api = %q, want normalized %q", c.api, APIResponses)
+	}
+	if !c.responsesEnabled() {
+		t.Fatal("responsesEnabled() = false, want true (normalized APIResponses)")
+	}
+	WithAPI("  Chat_Completions  ")(c)
+	if c.api != APIChatCompletions {
+		t.Fatalf("api = %q, want %q", c.api, APIChatCompletions)
+	}
+}
+
+func TestWithAPIAutoFallsBackToHeuristic(t *testing.T) {
+	// WithAPI("auto") sets a non-canonical value that must behave exactly
+	// like unset: responsesEnabled falls through to the model heuristic.
+	c := newClientWithTransport(t, "deepseek-v4-flash", WithAPI("auto"))
+	if !c.responsesEnabled() {
+		t.Fatal("auto + v4-flash: expected Responses API (heuristic)")
+	}
+	c2 := newClientWithTransport(t, "deepseek-chat", WithAPI("auto"))
+	if c2.responsesEnabled() {
+		t.Fatal("auto + chat alias: expected chat completions (heuristic)")
+	}
+}
+
+// TestResponsesIncompleteIsRetryableNotEndTurn: a response.incomplete frame
+// (server-side truncation) must retry like the chat-completions path, never
+// emit a clean end_turn with the delta-streamed tool call dropped.
+func TestResponsesIncompleteIsRetryableNotEndTurn(t *testing.T) {
+	var requests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "text/event-stream")
+		if requests == 1 {
+			_, _ = fmt.Fprint(w, "data: {\"type\":\"response.incomplete\",\"sequence_number\":1,\"response\":{\"id\":\"r1\",\"status\":\"incomplete\",\"output\":[],\"incomplete_details\":{\"reason\":\"max_output_tokens\"},\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n")
+			return
+		}
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"response.output_item.added\",\"sequence_number\":2,\"output_index\":0,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"edit\",\"arguments\":\"\"}}\n\n")
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"response.function_call_arguments.delta\",\"sequence_number\":3,\"output_index\":0,\"delta\":\"{\\\"file_path\\\":\\\"a.go\\\"}\"}\n\n")
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"response.completed\",\"sequence_number\":4,\"response\":{\"id\":\"r2\",\"status\":\"completed\",\"output\":[{\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"edit\",\"arguments\":\"{\\\"file_path\\\":\\\"a.go\\\"}\"},{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n")
+	}))
+	defer srv.Close()
+
+	_ = os.Setenv("DEEPSEEK_API_KEY", "test-key")
+	c, err := New(
+		WithBaseURL(srv.URL),
+		WithHTTPClient(srv.Client()),
+		WithModel("deepseek-v4-flash"),
+		WithThinking(false),
+	)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	var complete *llm.ProviderResponse
+	var gotErr error
+	for ev := range c.StreamResponse(context.Background(),
+		[]core.Message{{SessionID: "s1", Role: core.RoleUser, Text: "edit a.go"}},
+		[]core.Tool{fakeTool{"edit"}},
+	) {
+		if ev.Type == llm.EventError {
+			gotErr = ev.Err
+		}
+		if ev.Type == llm.EventComplete {
+			complete = ev.Response
+		}
+	}
+	if gotErr != nil {
+		t.Fatalf("provider error: %v", gotErr)
+	}
+	if requests != 2 {
+		t.Fatalf("requests = %d, want 2 (response.incomplete must retry, not emit end_turn)", requests)
+	}
+	if complete == nil || complete.FinishReason != core.FinishReasonToolUse || len(complete.ToolCalls) != 1 {
+		t.Fatalf("expected ToolUse with 1 call after retry, got %+v", complete)
+	}
+}
+
+// TestResponsesSparseTerminalKeepsDeltaStreamedCalls: when the terminal
+// payload omits the function_call items but the deltas already streamed them,
+// the accumulated calls must survive instead of being dropped into a clean
+// end_turn.
+func TestResponsesSparseTerminalKeepsDeltaStreamedCalls(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"response.output_item.added\",\"sequence_number\":1,\"output_index\":0,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"edit\",\"arguments\":\"\"}}\n\n")
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"response.function_call_arguments.delta\",\"sequence_number\":2,\"output_index\":0,\"delta\":\"{\\\"file_path\\\":\\\"a.go\\\"\"}\n\n")
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"response.function_call_arguments.delta\",\"sequence_number\":3,\"output_index\":0,\"delta\":\",\\\"mode\\\":\\\"full\\\"}\"}\n\n")
+		// Terminal payload omits the function_call item entirely.
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"response.completed\",\"sequence_number\":4,\"response\":{\"id\":\"r1\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n")
+	}))
+	defer srv.Close()
+
+	_ = os.Setenv("DEEPSEEK_API_KEY", "test-key")
+	c, err := New(
+		WithBaseURL(srv.URL),
+		WithHTTPClient(srv.Client()),
+		WithModel("deepseek-v4-flash"),
+		WithThinking(false),
+	)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	var complete *llm.ProviderResponse
+	for ev := range c.StreamResponse(context.Background(),
+		[]core.Message{{SessionID: "s1", Role: core.RoleUser, Text: "edit a.go"}},
+		[]core.Tool{fakeTool{"edit"}},
+	) {
+		if ev.Type == llm.EventError {
+			t.Fatalf("provider error: %v", ev.Err)
+		}
+		if ev.Type == llm.EventComplete {
+			complete = ev.Response
+		}
+	}
+	if complete == nil || complete.FinishReason != core.FinishReasonToolUse || len(complete.ToolCalls) != 1 {
+		t.Fatalf("expected ToolUse with the delta-streamed call, got %+v", complete)
+	}
+	got := complete.ToolCalls[0]
+	if got.ID != "call_1" || got.Name != "edit" || got.Input != `{"file_path":"a.go","mode":"full"}` {
+		t.Fatalf("tool call = %+v, want call_1/edit with merged delta arguments", got)
+	}
+}
+
+// TestResponsesIncompleteExhaustsRetries: when the server keeps truncating,
+// the client must stop after streamMaxAttempts with an error — never an
+// infinite loop and never a clean end_turn — and each retry carries
+// StreamReset so the consumer drops partial deltas.
+func TestResponsesIncompleteExhaustsRetries(t *testing.T) {
+	var requests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"response.incomplete\",\"sequence_number\":1,\"response\":{\"id\":\"r1\",\"status\":\"incomplete\",\"output\":[],\"incomplete_details\":{\"reason\":\"max_output_tokens\"},\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n")
+	}))
+	defer srv.Close()
+
+	_ = os.Setenv("DEEPSEEK_API_KEY", "test-key")
+	c, err := New(
+		WithBaseURL(srv.URL),
+		WithHTTPClient(srv.Client()),
+		WithModel("deepseek-v4-flash"),
+		WithThinking(false),
+		WithStreamMaxAttempts(2),
+	)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	var gotErr error
+	var retryResets int
+	var endTurn bool
+	for ev := range c.StreamResponse(context.Background(),
+		[]core.Message{{SessionID: "s1", Role: core.RoleUser, Text: "hi"}},
+		nil,
+	) {
+		switch ev.Type {
+		case llm.EventError:
+			gotErr = ev.Err
+		case llm.EventRetryScheduled:
+			if ev.Retry != nil && ev.Retry.StreamReset {
+				retryResets++
+			}
+		case llm.EventComplete:
+			if ev.Response != nil && ev.Response.FinishReason == core.FinishReasonEndTurn {
+				endTurn = true
+			}
+		}
+	}
+	if gotErr == nil {
+		t.Fatal("expected error after retries exhausted, not a clean end_turn")
+	}
+	if endTurn {
+		t.Fatal("incomplete must never produce a clean end_turn")
+	}
+	if requests != 2 {
+		t.Fatalf("requests = %d, want 2 (streamMaxAttempts)", requests)
+	}
+	if retryResets != 1 {
+		t.Fatalf("StreamReset retry events = %d, want 1", retryResets)
+	}
+}
+
+// TestResponsesIncompleteAfterProgressNotRetried: once deltas have streamed
+// (progress), an incomplete is surfaced as an error, not retried — parity with
+// the chat-completions path (partial output already delivered; StreamReset
+// would only be safe for pre-progress truncation).
+func TestResponsesIncompleteAfterProgressNotRetried(t *testing.T) {
+	var requests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"response.output_text.delta\",\"sequence_number\":1,\"delta\":\"partial\"}\n\n")
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"response.incomplete\",\"sequence_number\":2,\"response\":{\"id\":\"r1\",\"status\":\"incomplete\",\"output\":[],\"incomplete_details\":{\"reason\":\"max_output_tokens\"},\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n")
+	}))
+	defer srv.Close()
+
+	_ = os.Setenv("DEEPSEEK_API_KEY", "test-key")
+	c, err := New(
+		WithBaseURL(srv.URL),
+		WithHTTPClient(srv.Client()),
+		WithModel("deepseek-v4-flash"),
+		WithThinking(false),
+	)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	var gotErr error
+	var complete *llm.ProviderResponse
+	for ev := range c.StreamResponse(context.Background(),
+		[]core.Message{{SessionID: "s1", Role: core.RoleUser, Text: "hi"}},
+		nil,
+	) {
+		if ev.Type == llm.EventError {
+			gotErr = ev.Err
+		}
+		if ev.Type == llm.EventComplete {
+			complete = ev.Response
+		}
+	}
+	if gotErr == nil {
+		t.Fatal("expected error (incomplete after progress is not retried)")
+	}
+	if complete != nil && complete.FinishReason == core.FinishReasonEndTurn {
+		t.Fatal("must not emit a clean end_turn from a post-progress incomplete")
+	}
+	if requests != 1 {
+		t.Fatalf("requests = %d, want 1 (no retry after progress)", requests)
+	}
+}
+
+// TestResponsesSparseTerminalPreservesCallOrder: multiple delta-streamed
+// calls with non-contiguous indices survive in output-index order.
+func TestResponsesSparseTerminalPreservesCallOrder(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		for _, idx := range []int{0, 2} {
+			_, _ = fmt.Fprintf(w, "data: {\"type\":\"response.output_item.added\",\"sequence_number\":%d,\"output_index\":%d,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_%d\",\"name\":\"edit\",\"arguments\":\"\"}}\n\n", idx+1, idx, idx)
+		}
+		_, _ = fmt.Fprintf(w, "data: {\"type\":\"response.function_call_arguments.delta\",\"sequence_number\":4,\"output_index\":0,\"delta\":\"{\\\"a\\\":1}\"}\n\n")
+		_, _ = fmt.Fprintf(w, "data: {\"type\":\"response.function_call_arguments.delta\",\"sequence_number\":5,\"output_index\":2,\"delta\":\"{\\\"b\\\":2}\"}\n\n")
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"response.completed\",\"sequence_number\":6,\"response\":{\"id\":\"r1\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n")
+	}))
+	defer srv.Close()
+
+	_ = os.Setenv("DEEPSEEK_API_KEY", "test-key")
+	c, err := New(
+		WithBaseURL(srv.URL),
+		WithHTTPClient(srv.Client()),
+		WithModel("deepseek-v4-flash"),
+		WithThinking(false),
+	)
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+
+	var complete *llm.ProviderResponse
+	for ev := range c.StreamResponse(context.Background(),
+		[]core.Message{{SessionID: "s1", Role: core.RoleUser, Text: "edit"}},
+		[]core.Tool{fakeTool{"edit"}},
+	) {
+		if ev.Type == llm.EventError {
+			t.Fatalf("provider error: %v", ev.Err)
+		}
+		if ev.Type == llm.EventComplete {
+			complete = ev.Response
+		}
+	}
+	if complete == nil || complete.FinishReason != core.FinishReasonToolUse || len(complete.ToolCalls) != 2 {
+		t.Fatalf("expected 2 ToolUse calls, got %+v", complete)
+	}
+	if complete.ToolCalls[0].ID != "call_0" || complete.ToolCalls[1].ID != "call_2" {
+		t.Fatalf("calls out of output-index order: %+v", complete.ToolCalls)
 	}
 }

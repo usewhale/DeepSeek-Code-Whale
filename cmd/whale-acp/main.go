@@ -5,14 +5,17 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/BurntSushi/toml"
 	"github.com/usewhale/whale/internal/acp"
 	"github.com/usewhale/whale/internal/agent"
 	"github.com/usewhale/whale/internal/core"
+	"github.com/usewhale/whale/internal/defaults"
 	"github.com/usewhale/whale/internal/llm/deepseek"
 	whalemcp "github.com/usewhale/whale/internal/mcp"
 	"github.com/usewhale/whale/internal/policy"
@@ -51,13 +54,51 @@ func main() {
 		}
 	}
 
+	modelName, err := modelFromEnv()
+	if err != nil {
+		acp.Logger.Fatalf("invalid model configuration: %v", err)
+	}
+	api, err := apiFromEnv()
+	if err != nil {
+		acp.Logger.Fatalf("invalid API configuration: %v", err)
+	}
+	compactThresh, err := compactThresholdFromEnv()
+	if err != nil {
+		acp.Logger.Fatalf("invalid compaction configuration: %v", err)
+	}
+	// The context window is a model property: derive it from the resolved model
+	// name (1M for both V4 models) so the compaction trigger and tail budget
+	// agree with the provider's real ceiling. WHALE_CONTEXT_WINDOW overrides.
+	contextWindow := defaults.ContextWindowForModel(modelName)
+	if override, err := contextWindowFromEnv(); err != nil {
+		acp.Logger.Fatalf("invalid context-window configuration: %v", err)
+	} else if override > 0 {
+		contextWindow = override
+	}
+	maxToolIters, err := maxToolItersFromEnv()
+	if err != nil {
+		acp.Logger.Fatalf("invalid tool-iteration configuration: %v", err)
+	}
+
+	// The ACP path historically hardcoded the retired "deepseek-chat" alias,
+	// which silently dropped the context window to 128K and routed to chat
+	// completions. Resolve the real model (WHALE_MODEL validated against the
+	// supported set, else defaults.DefaultModel) once, and use the same name
+	// for both the provider and the window so they can never disagree.
 	provider, err := deepseek.New(
 		deepseek.WithAPIKey(apiKey),
-		deepseek.WithModel("deepseek-chat"),
+		deepseek.WithModel(modelName),
+		deepseek.WithAPI(api),
 	)
 	if err != nil {
 		acp.Logger.Fatalf("failed to create provider: %v", err)
 	}
+	apiLabel := string(api)
+	if apiLabel == "" {
+		apiLabel = "auto"
+	}
+	acp.Logger.Printf("provider: model=%s api=%q context_window=%d compact_threshold=%.2f max_tool_iters=%d",
+		modelName, apiLabel, contextWindow, compactThresh, maxToolIters)
 
 	sessionsDir := os.Getenv("WHALE_SESSIONS_DIR")
 	if sessionsDir == "" {
@@ -92,11 +133,16 @@ func main() {
 		sid := acpSessionID
 		ts.SetExecBoundaryApproval(func() string { return sid }, approvalFn)
 		mcpManager, reg := wireMCPServers(ts, dataDir, cwd, mcps)
+		// Auto-compaction must be wired explicitly and the threshold passed
+		// explicitly: the agent's own default is 0.90, while the CLI parity
+		// threshold is defaults.DefaultAutoCompactThreshold (0.85). Relying on
+		// the agent default would silently change the trigger point.
 		whaleAgent := agent.NewAgentWithRegistry(
 			provider,
 			msgStore,
 			reg,
-			agent.WithMaxToolIters(100),
+			agent.WithAutoCompact(true, compactThresh, contextWindow),
+			agent.WithMaxToolIters(maxToolIters),
 			agent.WithApprovalFunc(approvalFn),
 			agent.WithToolPolicy(sessionPolicy),
 		)
@@ -131,6 +177,90 @@ func main() {
 		fmt.Fprintf(os.Stderr, "fatal: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// Env knobs for the ACP entrypoint. These are read once at process start
+// (changing them requires restarting Zed's agent process) and are ACP-only:
+// the CLI path reads the same values from config.toml.
+//
+// modelFromEnv returns the resolved model name: WHALE_MODEL validated against
+// the supported set, or defaults.DefaultModel. Mirrors the CLI's model
+// resolution and validation (internal/ui/cli/cmd/root.go).
+func modelFromEnv() (string, error) {
+	// Canonicalize to the lowercase slug: IsSupportedModel matches
+	// case-insensitively, but the same name feeds both the provider (sent to
+	// the API as-is) and the window/transport inference (responsesCapableModel
+	// is a case-sensitive prefix). A mixed-case value that validated fine
+	// would otherwise make window (1M) and transport (chat completions)
+	// disagree and would send a non-canonical slug to the provider — the exact
+	// "one name, two meanings" failure this fix deletes.
+	if v := strings.ToLower(strings.TrimSpace(os.Getenv("WHALE_MODEL"))); v != "" {
+		if !defaults.IsSupportedModel(v) {
+			return "", fmt.Errorf("unsupported model: %s", v)
+		}
+		return v, nil
+	}
+	return defaults.DefaultModel, nil
+}
+
+// apiFromEnv returns the explicit API transport selection from WHALE_API
+// (responses | chat_completions | auto). The zero value (auto) is the default
+// and, for the default model deepseek-v4-flash, resolves to the Responses
+// API.
+func apiFromEnv() (deepseek.API, error) {
+	return deepseek.NormalizeAPI(os.Getenv("WHALE_API"))
+}
+
+// compactThresholdFromEnv returns the compaction trigger threshold.
+// Unset yields defaults.DefaultAutoCompactThreshold (0.85) — CLI parity. The
+// value is passed explicitly to WithAutoCompact because the agent's own
+// default (defaults.DefaultAgentCompactThreshold, 0.90) would otherwise win.
+func compactThresholdFromEnv() (float64, error) {
+	v := strings.TrimSpace(os.Getenv("WHALE_COMPACT_THRESHOLD"))
+	if v == "" {
+		return defaults.DefaultAutoCompactThreshold, nil
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	// math.IsNaN is required: NaN satisfies neither f <= 0 nor f >= 1, so a
+	// bare range check would accept it, and WithAutoCompact's threshold guard
+	// (t > 0 && t < 1) would then silently keep the agent's 0.90 default —
+	// the exact trap this knob exists to avoid. +/-Inf are already rejected by
+	// the range check.
+	if err != nil || math.IsNaN(f) || f <= 0 || f >= 1 {
+		return 0, fmt.Errorf("invalid WHALE_COMPACT_THRESHOLD %q: must be a finite float in (0,1)", v)
+	}
+	return f, nil
+}
+
+// contextWindowFromEnv returns an explicit context-window override from
+// WHALE_CONTEXT_WINDOW, or 0 when unset (caller derives the window from the
+// model). A set value must be a positive integer.
+func contextWindowFromEnv() (int, error) {
+	v := strings.TrimSpace(os.Getenv("WHALE_CONTEXT_WINDOW"))
+	if v == "" {
+		return 0, nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return 0, fmt.Errorf("invalid WHALE_CONTEXT_WINDOW %q: must be a positive integer", v)
+	}
+	return n, nil
+}
+
+// maxToolItersFromEnv returns the ACP tool-iteration cap. Unset yields
+// defaults.DefaultMaxToolIters (300). A value below 1 is rejected rather than
+// treated as "unlimited": the dynamic loop guards cannot see mutating-
+// argument-varying loops, so the ACP path must always keep a finite backstop.
+func maxToolItersFromEnv() (int, error) {
+	v := strings.TrimSpace(os.Getenv("WHALE_MAX_TOOL_ITERS"))
+	if v == "" {
+		return defaults.DefaultMaxToolIters, nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 1 {
+		return 0, fmt.Errorf("invalid WHALE_MAX_TOOL_ITERS %q: must be a positive integer", v)
+	}
+	return n, nil
 }
 
 func loadAPIKeyFromCredentials(dataDir string) string {

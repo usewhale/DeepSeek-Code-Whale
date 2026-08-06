@@ -37,8 +37,10 @@ func initAppRuntime(cfg Config, sessionInit appSessionInit, toolInit appToolInit
 	})
 	toolInit.toolset.SetExecBoundaryApproval(parentSessionIDFunc, approvalFunc)
 	toolInit.toolset.SetWebFetchExtractor(newDeepSeekWebFetchExtractor(webFetchExtractorOptions{
-		APIKey:  apiKey,
-		BaseURL: cfg.APIBaseURL,
+		APIKey:      apiKey,
+		BaseURL:     cfg.APIBaseURL,
+		API:         cfg.DeepSeekAPI,
+		RetryPolicy: retryPolicyFromConfig(cfg),
 	}))
 	providerFactory := func(model string, maxTokens int) (llm.Provider, error) {
 		if strings.TrimSpace(model) == "" {
@@ -57,6 +59,7 @@ func initAppRuntime(cfg Config, sessionInit appSessionInit, toolInit appToolInit
 			DeepSeekPrefixCompletion: cfg.DeepSeekPrefixCompletion,
 			DeepSeekMultimodal:       cfg.DeepSeekMultimodal,
 			DeepSeekWebSearch:        cfg.DeepSeekWebSearch,
+			DeepSeekAPI:              cfg.DeepSeekAPI,
 		})
 	}
 	providerFactoryWithOptions := func(req tasks.ProviderRequest) (llm.Provider, error) {
@@ -78,6 +81,7 @@ func initAppRuntime(cfg Config, sessionInit appSessionInit, toolInit appToolInit
 			DeepSeekPrefixCompletion: cfg.DeepSeekPrefixCompletion,
 			DeepSeekMultimodal:       cfg.DeepSeekMultimodal,
 			DeepSeekWebSearch:        cfg.DeepSeekWebSearch,
+			DeepSeekAPI:              cfg.DeepSeekAPI,
 		})
 	}
 	workspaceTools := func(workspace tasks.ToolWorkspace) (*core.ToolRegistry, error) {
@@ -99,8 +103,10 @@ func initAppRuntime(cfg Config, sessionInit appSessionInit, toolInit appToolInit
 			toolset.SetExtraSkills(toolInit.pluginManager.Skills())
 		}
 		toolset.SetWebFetchExtractor(newDeepSeekWebFetchExtractor(webFetchExtractorOptions{
-			APIKey:  apiKey,
-			BaseURL: cfg.APIBaseURL,
+			APIKey:      apiKey,
+			BaseURL:     cfg.APIBaseURL,
+			API:         cfg.DeepSeekAPI,
+			RetryPolicy: retryPolicyFromConfig(cfg),
 		}))
 		return core.NewToolRegistryChecked(toolset.Tools())
 	}

@@ -253,6 +253,12 @@ func (h *Handler) translateEvent(ev agent.AgentEvent) *SessionUpdate {
 		// End of stream — handled by the caller.
 		return nil
 
+	case agent.AgentEventTypeContextCompacted:
+		// Compaction is an internal history rewrite, not agent output Zed
+		// renders. Drop it deliberately (nil) so it is never surfaced as a
+		// stray message chunk; the turn continues normally after the rewrite.
+		return nil
+
 	default:
 		return nil
 	}

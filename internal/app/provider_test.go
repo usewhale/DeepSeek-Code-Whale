@@ -205,3 +205,64 @@ func TestRetryPolicyFromConfigDisablesRequestRetriesWhenExplicitZero(t *testing.
 		t.Fatalf("MaxAttempts = %d, want one attempt with no retries", policy.MaxAttempts)
 	}
 }
+
+// TestNewDeepSeekProviderHonorsAPI locks the Phase 1b wire-through: the CLI
+// provider constructor must pass providerOptions.DeepSeekAPI into the deepseek
+// client, so an explicit transport selection wins for the CLI path too (not
+// just the ACP entrypoint). Responses API -> /responses; chat_completions ->
+// /chat/completions, regardless of the model heuristic.
+func TestNewDeepSeekProviderHonorsAPI(t *testing.T) {
+	t.Setenv("DEEPSEEK_API_KEY", "test-key")
+	for _, tc := range []struct {
+		name string
+		api  deepseek.API
+		path string
+	}{
+		{name: "responses forces responses endpoint", api: deepseek.APIResponses, path: "/responses"},
+		{name: "chat_completions forces chat endpoint", api: deepseek.APIChatCompletions, path: "/chat/completions"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotPath string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotPath = r.URL.Path
+				w.Header().Set("Content-Type", "text/event-stream")
+				if tc.path == "/responses" {
+					_, _ = fmt.Fprint(w, "data: {\"type\":\"response.output_text.delta\",\"sequence_number\":3,\"delta\":\"ok\"}\n\n")
+					_, _ = fmt.Fprint(w, "data: {\"type\":\"response.completed\",\"sequence_number\":5,\"response\":{\"id\":\"r1\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n")
+				} else {
+					_, _ = fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n")
+					_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+				}
+			}))
+			defer srv.Close()
+
+			// v4-flash + web_search auto would normally pick the Responses API;
+			// the explicit API option must be the authority in both directions.
+			provider, err := newDeepSeekProvider(providerOptions{
+				BaseURL:         srv.URL,
+				Model:           "deepseek-v4-flash",
+				DeepSeekAPI:     tc.api,
+				ReasoningEffort: "high",
+				ThinkingEnabled: true,
+			})
+			if err != nil {
+				t.Fatalf("newDeepSeekProvider: %v", err)
+			}
+			var sawComplete bool
+			for ev := range provider.StreamResponse(context.Background(), []core.Message{{Role: core.RoleUser, Text: "hi"}}, nil) {
+				if ev.Type == llm.EventError {
+					t.Fatalf("provider error: %v", ev.Err)
+				}
+				if ev.Type == llm.EventComplete {
+					sawComplete = true
+				}
+			}
+			if gotPath != tc.path {
+				t.Fatalf("request path = %q, want %q (DeepSeekAPI must be honored)", gotPath, tc.path)
+			}
+			if !sawComplete {
+				t.Fatal("expected a complete event")
+			}
+		})
+	}
+}

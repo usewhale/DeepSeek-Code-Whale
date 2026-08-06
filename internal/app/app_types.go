@@ -50,6 +50,7 @@ type Config struct {
 	DeepSeekPrefixCompletion       bool
 	DeepSeekMultimodal             MultimodalProviderConfig
 	DeepSeekWebSearch              deepseek.WebSearchMode
+	DeepSeekAPI                    deepseek.API
 	ShellForegroundWaitDefaultMS   int
 	ShellForegroundWaitMaxMS       int
 	MaxParallelSubagents           int
