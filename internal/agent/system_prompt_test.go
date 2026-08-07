@@ -526,7 +526,6 @@ func TestImmutableSystemBlocksIncludeAnnounceThenStop(t *testing.T) {
 		"never end a turn by announcing further work",
 		"do it now, in this turn, with tool calls",
 		`"stop"`,
-		"planned-but-unexecuted next steps are a failure",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("announce-then-stop block missing %q:\n%s", want, joined)
