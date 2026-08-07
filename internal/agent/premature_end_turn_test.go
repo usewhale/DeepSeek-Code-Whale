@@ -151,6 +151,14 @@ func TestShouldRecoverPrematureEndTurn(t *testing.T) {
 		// Non-colon fallback: the one known "."-terminated announce-then-stop
 		// instance is caught by the trailing action-clause prefix scan.
 		{name: "dot-terminated action clause fallback", text: "Amend tests into commit, then append maintainer reply draft.", mode: session.ModeAgent, toolsAvailable: true, want: true},
+		// Non-colon inflected lead-ins: the prefix scan also matches -ing
+		// gerund forms, so "fixing"/"running"/"updating"/"writing" without a
+		// trailing colon are recovered instead of slipping through.
+		{name: "non-colon gerund fixing", text: "The typo is clear. Fixing the permission check", mode: session.ModeAgent, toolsAvailable: true, want: true},
+		{name: "non-colon gerund running", text: "The suite is ready. Running the tests", mode: session.ModeAgent, toolsAvailable: true, want: true},
+		{name: "non-colon gerund updating", text: "Rebuild needed. Updating the dependency", mode: session.ModeAgent, toolsAvailable: true, want: true},
+		{name: "non-colon gerund writing", text: "Understood. Writing the patch", mode: session.ModeAgent, toolsAvailable: true, want: true},
+		{name: "non-colon gerund retrying", text: "Rate limited. Retrying the request", mode: session.ModeAgent, toolsAvailable: true, want: true},
 		// Accepted colon false positives: bounded by the 2-nudge cap, harmless
 		// per the nudge's "If no action remains, provide the complete final
 		// answer" escape hatch.
@@ -178,6 +186,7 @@ func TestShouldRecoverPrematureEndTurn(t *testing.T) {
 		{name: "bare fullwidth colon", text: "：", mode: session.ModeAgent, toolsAvailable: true, want: true},
 		{name: "empty text", text: "   ", mode: session.ModeAgent, toolsAvailable: true},
 		{name: "no colon no prefix bullet", text: "The output is ready.", mode: session.ModeAgent, toolsAvailable: true},
+		{name: "non-action gerund not matched", text: "The response was helpful. Singing the final note is next.", mode: session.ModeAgent, toolsAvailable: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
