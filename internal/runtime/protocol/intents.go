@@ -41,6 +41,7 @@ const (
 
 type Intent struct {
 	Kind               IntentKind            `json:"kind"`
+	InterruptSource    string                `json:"interrupt_source,omitempty"`
 	Input              string                `json:"input,omitempty"`
 	ClientInputID      string                `json:"client_input_id,omitempty"`
 	HiddenInput        bool                  `json:"hidden_input,omitempty"`

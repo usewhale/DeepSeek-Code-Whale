@@ -660,5 +660,5 @@ func (m *model) handleSessionHydratedEvent(ev protocol.Event) tea.Cmd {
 
 func (m *model) handleExitRequestedEvent() {
 	m.clearProviderRetryStatus()
-	m.dispatchIntent(protocol.Intent{Kind: protocol.IntentShutdown})
+	m.dispatchIntent(protocol.Intent{Kind: protocol.IntentShutdown, InterruptSource: "exit_requested"})
 }

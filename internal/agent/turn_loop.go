@@ -216,7 +216,7 @@ func (a *Agent) runStreamWithNewMessages(ctx context.Context, sessionID string, 
 			if sErr != nil {
 				if errors.Is(sErr, context.Canceled) {
 					if !isServiceShutdown(ctx) {
-						a.persistInterruptedTurnMarker(sessionID)
+						a.persistInterruptedTurnMarker(ctx, sessionID)
 					}
 					emit(AgentEvent{Type: AgentEventTypeTurnCancelled, Content: "turn cancelled"})
 					return
@@ -249,7 +249,7 @@ func (a *Agent) runStreamWithNewMessages(ctx context.Context, sessionID string, 
 				if ctx.Err() != nil {
 					if errors.Is(ctx.Err(), context.Canceled) {
 						if !isServiceShutdown(ctx) {
-							a.persistInterruptedTurnMarker(sessionID)
+							a.persistInterruptedTurnMarker(ctx, sessionID)
 						}
 						return
 					}
