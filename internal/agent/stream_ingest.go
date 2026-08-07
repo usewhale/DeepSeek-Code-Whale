@@ -183,7 +183,7 @@ func (a *Agent) collectAssistantStream(ctx context.Context, sessionID string, rt
 				} else {
 					assistant.FinishReason = core.FinishReasonError
 				}
-				assistant.ErrorDetail = ev.Err.Error()
+				assistant.ErrorDetail = cancellationErrorDetail(ctx, ev.Err)
 				assistant.ToolCalls = nil
 				a.bestEffortUpdateAssistant(assistant)
 				return core.Message{}, llm.Usage{}, "", nil, ev.Err
@@ -210,6 +210,21 @@ func (a *Agent) collectAssistantStream(ctx context.Context, sessionID string, rt
 	}
 	cacheShape := buildCacheShapeForRequestWithRuntime(cacheShapeRequestAgent, history, toolList, assistantPrefix, rt.Prefix.SystemBlocks(), rt.RuntimeBlocks())
 	return assistant, lastUsage, lastModel, cacheShape, nil
+}
+
+func cancellationErrorDetail(ctx context.Context, err error) string {
+	if err == nil {
+		return ""
+	}
+	detail := err.Error()
+	if !errors.Is(err, context.Canceled) {
+		return detail
+	}
+	cause := context.Cause(ctx)
+	if cause == nil || cause == context.Canceled {
+		return detail
+	}
+	return detail + " (cancel cause: " + cause.Error() + ")"
 }
 
 // messageUsageFrom converts provider usage into the persisted form,

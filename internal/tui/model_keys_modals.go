@@ -166,7 +166,7 @@ func (m *model) handleUserInputKey(msg tea.KeyMsg) tea.Cmd {
 	switch msg.String() {
 	case "esc":
 		if m.busy {
-			return m.interruptBusyTurn()
+			return m.interruptBusyTurn("esc")
 		}
 		m.dispatchIntent(protocol.Intent{Kind: protocol.IntentCancelUserInput, ToolCallID: m.userInput.toolCallID})
 		m.mode = modeChat

@@ -50,7 +50,7 @@ func (s *Service) Dispatch(in Intent) {
 	case IntentShutdown:
 		s.cancelMu.Lock()
 		if s.cancelCause != nil {
-			s.cancelCause(agent.ErrUserInterrupt)
+			s.cancelCause(agent.NewUserInterrupt(in.InterruptSource))
 		} else if s.cancel != nil {
 			s.cancel()
 		}

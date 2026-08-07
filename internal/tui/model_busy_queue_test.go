@@ -581,7 +581,7 @@ func TestEscWithQueuedPromptSubmitsItAfterInterrupt(t *testing.T) {
 	if !strings.Contains(renderedAfterEsc, "Interrupted to submit queued follow-up") {
 		t.Fatalf("queued Esc interrupt should show queued follow-up notice:\n%s", renderedAfterEsc)
 	}
-	if len(*intents) != 1 || (*intents)[0].Kind != protocol.IntentShutdown {
+	if len(*intents) != 1 || (*intents)[0].Kind != protocol.IntentShutdown || (*intents)[0].InterruptSource != "esc" {
 		t.Fatalf("expected shutdown intent from Esc, got %+v", *intents)
 	}
 
@@ -612,7 +612,7 @@ func TestEscWithDraftQueuesAndSubmitsItAfterInterrupt(t *testing.T) {
 	if !m.submitQueuedPromptAfterInterrupt {
 		t.Fatal("expected Esc with draft to queue and request immediate submit")
 	}
-	if len(*intents) != 1 || (*intents)[0].Kind != protocol.IntentShutdown {
+	if len(*intents) != 1 || (*intents)[0].Kind != protocol.IntentShutdown || (*intents)[0].InterruptSource != "esc" {
 		t.Fatalf("expected shutdown intent from Esc, got %+v", *intents)
 	}
 
@@ -675,7 +675,7 @@ func TestCtrlCWhileBusyInterruptsWithoutArmingQuit(t *testing.T) {
 	if !m.quitArmedUntil.IsZero() {
 		t.Fatal("expected ctrl+c while busy not to arm quit")
 	}
-	if len(*intents) != 1 || (*intents)[0].Kind != protocol.IntentShutdown {
+	if len(*intents) != 1 || (*intents)[0].Kind != protocol.IntentShutdown || (*intents)[0].InterruptSource != "ctrl+c" {
 		t.Fatalf("expected ctrl+c while busy to dispatch shutdown intent, got %+v", *intents)
 	}
 

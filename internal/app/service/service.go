@@ -55,6 +55,7 @@ const (
 
 type Intent struct {
 	Kind               IntentKind
+	InterruptSource    string
 	Input              string
 	ClientInputID      string
 	HiddenInput        bool

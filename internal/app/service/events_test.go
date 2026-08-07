@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -1293,6 +1294,32 @@ func TestShutdownCancelsPendingInteractions(t *testing.T) {
 	}
 	if len(svc.inputs) != 0 {
 		t.Fatalf("pending inputs not cleared: %+v", svc.inputs)
+	}
+}
+
+func TestShutdownPreservesInterruptSource(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	turnCtx, turnCancel := context.WithCancelCause(ctx)
+	svc := &Service{
+		ctx:         ctx,
+		events:      make(chan Event, 1),
+		cancelCause: turnCancel,
+	}
+
+	svc.Dispatch(Intent{Kind: IntentShutdown, InterruptSource: "esc"})
+
+	select {
+	case <-turnCtx.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("shutdown did not cancel active turn")
+	}
+	cause := context.Cause(turnCtx)
+	if !errors.Is(cause, agent.ErrUserInterrupt) {
+		t.Fatalf("cause = %v, want user interrupt", cause)
+	}
+	if got := agent.UserInterruptSource(cause); got != "esc" {
+		t.Fatalf("source = %q, want esc", got)
 	}
 }
 
