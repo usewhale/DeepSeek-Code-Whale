@@ -74,11 +74,13 @@ var prematureActionPrefixes = []string{
 	"跑",
 }
 
-// shouldRecoverPrematureEndTurn recognizes the narrow failure shape observed
-// in DeepSeek sessions: an Agent-mode reply stops at an action lead-in ending
-// in a colon, yet contains no structured tool call. Requiring both the dangling
-// colon and an immediate-action prefix avoids retrying ordinary final answers,
-// questions, headings, Plan replies, and tool-suppressed internal requests.
+// shouldRecoverPrematureEndTurn catches an Agent-mode reply that stops at an
+// action lead-in without issuing a tool call. A trailing colon alone triggers
+// recovery: a colon-terminated final answer invites continuation, and the
+// nudge's escape hatch plus the 2-nudge cap bound a false positive to one extra
+// model call. Non-colon text falls back to the action-prefix scan, covering the
+// one known "."-terminated instance. Outer gates stay: Agent mode, tools
+// available, SuppressTools off, end_turn, no tool calls.
 func shouldRecoverPrematureEndTurn(msg core.Message, mode session.Mode, opts RunOptions, toolsAvailable bool) bool {
 	if mode != session.ModeAgent || opts.SuppressTools || !toolsAvailable {
 		return false
@@ -87,11 +89,11 @@ func shouldRecoverPrematureEndTurn(msg core.Message, mode session.Mode, opts Run
 		return false
 	}
 	text := strings.TrimSpace(msg.Text)
-	if !strings.HasSuffix(text, ":") && !strings.HasSuffix(text, "：") {
-		return false
+	if strings.HasSuffix(text, ":") || strings.HasSuffix(text, "：") {
+		return true
 	}
 
-	clause := trailingActionClause(strings.TrimSpace(strings.TrimSuffix(strings.TrimSuffix(text, ":"), "：")))
+	clause := trailingActionClause(text)
 	clause = strings.ToLower(strings.TrimSpace(clause))
 	for _, prefix := range prematureActionPrefixes {
 		if strings.HasPrefix(clause, prefix) {
