@@ -111,7 +111,7 @@ func (a *App) ExecuteSlash(line string) (CommandExecution, error) {
 			oldMsgCount = len(msgs)
 		}
 	}
-	a.sessionID = cmdResult.SessionID
+	a.setSessionID(cmdResult.SessionID)
 	if isNewCommand {
 		modeState, err := session.LoadModeState(a.sessionsDir, a.sessionID)
 		if err != nil {

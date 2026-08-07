@@ -264,14 +264,18 @@ type promotedToolState struct {
 }
 
 func (a *App) writePromotedToolState(state promotedToolState) error {
-	if a == nil || a.sessionsDir == "" || a.sessionID == "" {
+	if a == nil {
+		return nil
+	}
+	sessionsDir, sessionID := a.sessionPath()
+	if sessionsDir == "" || sessionID == "" {
 		return nil
 	}
 	b, err := json.Marshal(state)
 	if err != nil {
 		return err
 	}
-	path := filepath.Join(a.sessionsDir, a.sessionID, "promoted_tools.json")
+	path := filepath.Join(sessionsDir, sessionID, "promoted_tools.json")
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
@@ -279,10 +283,14 @@ func (a *App) writePromotedToolState(state promotedToolState) error {
 }
 
 func (a *App) loadPromotedToolState() ([]string, error) {
-	if a == nil || a.sessionsDir == "" || a.sessionID == "" {
+	if a == nil {
 		return nil, nil
 	}
-	path := filepath.Join(a.sessionsDir, a.sessionID, "promoted_tools.json")
+	sessionsDir, sessionID := a.sessionPath()
+	if sessionsDir == "" || sessionID == "" {
+		return nil, nil
+	}
+	path := filepath.Join(sessionsDir, sessionID, "promoted_tools.json")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
