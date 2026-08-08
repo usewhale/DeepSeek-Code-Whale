@@ -441,7 +441,7 @@ func isMarkdownAutolinkTarget(target string) bool {
 func escapeMarkdownLiteral(input string) string {
 	var out strings.Builder
 	for i := 0; i < len(input); i++ {
-		if strings.ContainsRune(markdownSpecialChars, rune(input[i])) {
+		if strings.IndexByte(markdownSpecialChars, input[i]) >= 0 {
 			out.WriteByte('\\')
 		}
 		out.WriteByte(input[i])
