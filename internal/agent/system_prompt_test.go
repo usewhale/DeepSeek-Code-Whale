@@ -513,3 +513,45 @@ func TestImmutableSystemPromptToolPolicyDoesNotDependOnToolRegistry(t *testing.T
 		t.Fatalf("immutable system prompt changed with tool registry\nwithout tools:\n%s\n\nwith tools:\n%s", a, b)
 	}
 }
+
+// TestImmutableSystemBlocksIncludeAnnounceThenStop verifies the announce-
+// then-stop instruction is a static immutable block, so it reaches every
+// entrypoint (ACP, terminal CLI, subagents) that shares the turn loop.
+func TestImmutableSystemBlocksIncludeAnnounceThenStop(t *testing.T) {
+	a := NewAgentWithRegistry(nil, nil, core.NewToolRegistry(nil), WithProjectMemory(false, 0, nil, "/repo"))
+	joined := strings.Join(a.buildImmutableSystemBlocks(), "\n\n")
+
+	for _, want := range []string{
+		"Execute, don't narrate",
+		"never end a turn by announcing further work",
+		"do it now, in this turn, with tool calls",
+		`"stop"`,
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("announce-then-stop block missing %q:\n%s", want, joined)
+		}
+	}
+	if got := strings.Count(joined, "Execute, don't narrate"); got != 1 {
+		t.Fatalf("announce-then-stop block appears %d times, want exactly once:\n%s", got, joined)
+	}
+	// The instruction is a contract, not runtime context: it must never depend
+	// on the tool registry or session mode, and it must not be duplicated into
+	// the runtime blocks (which are re-rendered per turn).
+	runtime := strings.Join(a.buildRuntimeSystemBlocks(), "\n\n")
+	if strings.Contains(runtime, "Execute, don't narrate") {
+		t.Fatalf("announce-then-stop block leaked into runtime blocks:\n%s", runtime)
+	}
+	modes := []session.Mode{session.ModeAgent, session.ModeAsk, session.ModePlan}
+	for _, m := range modes {
+		withMode := NewAgentWithRegistry(nil, nil, core.NewToolRegistry(nil), WithSessionMode(m))
+		if got := strings.Join(withMode.buildImmutableSystemBlocks(), "\n\n"); !strings.Contains(got, "Execute, don't narrate") {
+			t.Fatalf("mode %v missing announce-then-stop block", m)
+		}
+	}
+	// Immutable blocks are shared by every entrypoint via the turn loop; the
+	// tool registry must not change the block (it is appended unconditionally).
+	withTools := NewAgentWithRegistry(nil, nil, core.NewToolRegistry([]core.Tool{&recordingWorkflowTool{}}))
+	if got := strings.Join(withTools.buildImmutableSystemBlocks(), "\n\n"); !strings.Contains(got, "Execute, don't narrate") {
+		t.Fatalf("with-tools agent missing announce-then-stop block")
+	}
+}
