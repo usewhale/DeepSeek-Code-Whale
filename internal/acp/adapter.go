@@ -375,10 +375,20 @@ func NewACPApprovalFunc(transport *Transport) policy.ApprovalFunc {
 				Status:     ToolCallStatusPending,
 			},
 			Options: []PermissionOption{
-				{OptionID: "once", Kind: "allow_once", Name: "Allow once"},
-				{OptionID: "always", Kind: "allow_always", Name: "Always allow"},
-				{OptionID: "reject", Kind: "reject_once", Name: "Reject"},
+				{OptionID: "once", Kind: KindAllowOnce, Name: "Allow once"},
+				{OptionID: "always", Kind: KindAllowAlways, Name: "Always allow"},
+				{OptionID: "reject", Kind: KindRejectOnce, Name: "Reject"},
 			},
+		}
+
+		// Refuse to send an unserializable request: the ACP client's strict
+		// serde enum rejects unknown PermissionOptionKind values at
+		// deserialization, which surfaces as a silent approval denial. Deny
+		// loudly here instead, so a newly added invalid kind can never reach
+		// the wire.
+		if bad, ok := invalidPermissionOptionKind(permReq.Options); ok {
+			Logger.Printf("refusing to send request_permission: invalid option kind %q — denying", bad)
+			return policy.ApprovalDeny
 		}
 
 		resp, err := transport.CallClientMethod(req.SessionID, MethodSessionRequestPerm, permReq)
@@ -417,4 +427,17 @@ func NewACPApprovalFunc(transport *Transport) policy.ApprovalFunc {
 			return policy.ApprovalDeny
 		}
 	}
+}
+
+// invalidPermissionOptionKind returns the first option whose kind is not one
+// of the four schema-defined PermissionOptionKind values, and whether any such
+// option exists. Kept as a standalone helper so the send-path guard in
+// NewACPApprovalFunc is directly testable.
+func invalidPermissionOptionKind(opts []PermissionOption) (PermissionOptionKind, bool) {
+	for _, opt := range opts {
+		if !opt.Kind.Valid() {
+			return opt.Kind, true
+		}
+	}
+	return "", false
 }

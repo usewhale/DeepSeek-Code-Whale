@@ -675,11 +675,42 @@ type PermissionToolCall struct {
 	Meta       map[string]any    `json:"_meta,omitempty"`
 }
 
+// PermissionOptionKind is the ACP schema `PermissionOptionKind` enum
+// (agent-client-protocol-schema v1/client.rs and v2/client.rs). The schema
+// defines exactly these four values; the client deserializes the
+// request_permission payload with a strict serde enum, so any other string
+// (e.g. "allow_tool") fails at deserialization and the approval is silently
+// denied. New kinds must first exist in the schema crate.
+type PermissionOptionKind string
+
+// Schema-valid permission option kinds. Keep in sync with the
+// agent-client-protocol-schema `PermissionOptionKind` enum.
+const (
+	KindAllowOnce    PermissionOptionKind = "allow_once"
+	KindAllowAlways  PermissionOptionKind = "allow_always"
+	KindRejectOnce   PermissionOptionKind = "reject_once"
+	KindRejectAlways PermissionOptionKind = "reject_always"
+)
+
+// Valid reports whether k is one of the four schema-defined kinds. Any new
+// kind must be added to the schema crate first, then to this list.
+func (k PermissionOptionKind) Valid() bool {
+	switch k {
+	case KindAllowOnce, KindAllowAlways, KindRejectOnce, KindRejectAlways:
+		return true
+	default:
+		return false
+	}
+}
+
+// String renders the wire value of the kind.
+func (k PermissionOptionKind) String() string { return string(k) }
+
 // PermissionOption is a choice presented to the user.
 type PermissionOption struct {
-	OptionID string `json:"optionId"`
-	Name     string `json:"name"`
-	Kind     string `json:"kind"` // "allow_once", "allow_always", "reject_once"
+	OptionID string               `json:"optionId"`
+	Name     string               `json:"name"`
+	Kind     PermissionOptionKind `json:"kind"`
 }
 
 // PermissionOutcome mirrors the ACP schema's nested outcome wrapper.
