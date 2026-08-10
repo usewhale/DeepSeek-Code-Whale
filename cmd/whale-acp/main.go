@@ -8,8 +8,10 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/BurntSushi/toml"
 	"github.com/usewhale/whale/internal/acp"
@@ -400,6 +402,29 @@ func mergePermissions(dst, src *permFile) {
 	}
 }
 
+// mcpConsentRefusedMarker is the standardized stderr token that
+// whale-ecosystem MCP servers emit when spawned without explicit consent
+// (see the --allow-spawn spec). whale-acp matches it to enrich logs and to
+// treat the failure as a deterministic refusal.
+const mcpConsentRefusedMarker = "MCP-CONSENT-REFUSED"
+
+// failedMCPServers is a per-process negative cache of servers that failed to
+// start, keyed by identity. Without it, a session-heavy host would re-spawn a
+// broken server (e.g. a consent-refusing codemap) on every session/new.
+var failedMCPServers sync.Map // key: mcpServerKey -> struct{}
+
+func mcpServerKey(name, command string, args []string) string {
+	return name + "\x00" + command + "\x00" + strings.Join(args, "\x00")
+}
+
+// isConsentRefused reports whether a server failure carries the standardized
+// "refused to start without explicit consent" marker (see the --allow-spawn
+// spec), matched anywhere in the joined error/stderr text. It only affects log
+// classification; the failure is negative-cached either way.
+func isConsentRefused(err string) bool {
+	return strings.Contains(err, mcpConsentRefusedMarker)
+}
+
 // wireMCPServers loads the session MCP config, connects the configured
 // servers, and configures the toolset's deferred MCP catalog so the agent can
 // discover and promote mcp__<server>__<tool> tools via tool_search. MCP tools
@@ -414,6 +439,15 @@ func wireMCPServers(ts *tools.Toolset, dataDir, cwd string, mcps []acp.MCPServer
 		acp.Logger.Printf("mcp config: %v", err)
 		mcpCfg = whalemcp.Config{Servers: map[string]whalemcp.ServerConfig{}}
 	}
+	// Skip servers that failed to start in an earlier session of this process:
+	// don't re-spawn something known-broken on every session/new.
+	for _, name := range sortedKeys(mcpCfg.Servers) {
+		srv := mcpCfg.Servers[name]
+		if _, bad := failedMCPServers.Load(mcpServerKey(name, srv.Command, srv.Args)); bad {
+			delete(mcpCfg.Servers, name)
+			acp.Logger.Printf("mcp server %s: previously failed to start, skipping", sanitizeLogName(name))
+		}
+	}
 	var mcpManager *whalemcp.Manager
 	var reg *core.ToolRegistry
 	if len(mcpCfg.Servers) > 0 {
@@ -422,9 +456,16 @@ func wireMCPServers(ts *tools.Toolset, dataDir, cwd string, mcps []acp.MCPServer
 		for _, st := range mcpManager.States() {
 			switch st.Status {
 			case whalemcp.StatusFailed, whalemcp.StatusCancelled:
-				acp.Logger.Printf("mcp server %s: %s (%s)", st.Name, st.Status, st.Error)
+				if srv, ok := mcpCfg.Servers[st.Name]; ok {
+					failedMCPServers.Store(mcpServerKey(st.Name, srv.Command, srv.Args), struct{}{})
+				}
+				if isConsentRefused(st.Error) {
+					acp.Logger.Printf("mcp server %s: refused to start without explicit consent (%s)", sanitizeLogName(st.Name), sanitizeLogName(st.Error))
+				} else {
+					acp.Logger.Printf("mcp server %s: %s (%s)", sanitizeLogName(st.Name), st.Status, sanitizeLogName(st.Error))
+				}
 			default:
-				acp.Logger.Printf("mcp server %s: %s (%d tools)", st.Name, st.Status, len(st.ToolNames))
+				acp.Logger.Printf("mcp server %s: %s (%d tools)", sanitizeLogName(st.Name), st.Status, len(st.ToolNames))
 			}
 		}
 		if catalog := mcpManager.BuildDeferredCatalog(); catalog != nil && !catalog.Empty() {
@@ -464,6 +505,19 @@ func mcpConfigForSession(dataDir string, mcps []acp.MCPServer) (whalemcp.Config,
 	if err != nil {
 		return cfg, err
 	}
+	if len(mcps) > 0 {
+		// Client-supplied servers are arbitrary stdio processes spawned with
+		// the whale-acp user's privileges. That is the ACP trust model (the
+		// host is fully trusted), but make it visible in the log.
+		acp.Logger.Printf("connecting %d MCP server(s) supplied by the ACP client", len(mcps))
+	}
+	for _, name := range sortedKeys(cfg.Servers) {
+		if srv := cfg.Servers[name]; strings.TrimSpace(srv.URL) != "" {
+			// The local baseline is passed through unchanged (matching the main
+			// app), but http transport is outside the stdio-only advertisement.
+			acp.Logger.Printf("baseline mcp server %s uses url transport (%s); whale-acp advertises stdio only", sanitizeLogName(name), sanitizeLogName(srv.URL))
+		}
+	}
 	for _, m := range mcps {
 		name := strings.TrimSpace(m.Name)
 		if name == "" {
@@ -471,7 +525,7 @@ func mcpConfigForSession(dataDir string, mcps []acp.MCPServer) (whalemcp.Config,
 		}
 		if kind := clientMCPServerTransport(m); kind != "stdio" {
 			// We advertise mcpCapabilities {http:false, sse:false} — stdio only.
-			acp.Logger.Printf("mcp server %s: unsupported transport %q (stdio only), skipping", name, kind)
+			acp.Logger.Printf("mcp server %s: unsupported transport %q (stdio only), skipping", sanitizeLogName(name), kind)
 			continue
 		}
 		cfg.Servers[name] = whalemcp.ServerConfig{
@@ -498,6 +552,30 @@ func envVariableMap(envs []acp.EnvVariable) map[string]string {
 			out[e.Name] = e.Value
 		}
 	}
+	return out
+}
+
+// sanitizeLogName strips control characters (log-injection defense) before a
+// value is written to the log: newline/CR/tab and the rest of the C0 controls
+// plus DEL are replaced with spaces so a client-supplied server name or error
+// cannot forge log lines or inject terminal sequences.
+func sanitizeLogName(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r < ' ' || r == 0x7f {
+			return ' '
+		}
+		return r
+	}, s)
+}
+
+// sortedKeys returns the sorted keys of a string-keyed map, for deterministic
+// iteration order in logs.
+func sortedKeys[V any](m map[string]V) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
 	return out
 }
 

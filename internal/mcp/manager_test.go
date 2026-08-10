@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -669,4 +670,136 @@ func singleFailedStateError(t *testing.T, mgr *Manager) string {
 		t.Fatalf("states: %+v", states)
 	}
 	return states[0].Error
+}
+
+// TestManagerCapturesStdioStderrOnFastFailure verifies the server's stderr is
+// captured from the original spawn (no re-spawn needed to diagnose).
+func TestManagerCapturesStdioStderrOnFastFailure(t *testing.T) {
+	mgr := NewManager(Config{
+		Servers: map[string]ServerConfig{
+			"boom": {
+				Command: "/bin/sh",
+				Args:    []string{"-c", "echo boom-stderr >&2; exit 1"},
+				Timeout: 5,
+			},
+		},
+	})
+	mgr.Initialize(context.Background())
+	t.Cleanup(func() { _ = mgr.Close() })
+
+	states := mgr.States()
+	if len(states) != 1 {
+		t.Fatalf("states: %+v", states)
+	}
+	if states[0].Status != StatusFailed {
+		t.Fatalf("expected failed state, got %+v", states[0])
+	}
+	if !strings.Contains(states[0].Error, "boom-stderr") {
+		t.Fatalf("expected captured stderr in error, got %q", states[0].Error)
+	}
+}
+
+// TestBoundedStderrTail verifies the stderr capture is bounded and keeps the
+// tail: the diagnostic value of stderr is the last lines, and a server may
+// live (and chatter) for the whole process lifetime.
+func TestBoundedStderrTail(t *testing.T) {
+	var b boundedStderr
+	// 201KB of input against a 64KB cap: the head must be dropped, the tail kept.
+	if _, err := b.Write(bytes.Repeat([]byte("H"), 1000)); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 200; i++ {
+		if _, err := b.Write(bytes.Repeat([]byte("T"), 1000)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := b.String()
+	if len(got) > stdioStderrCap {
+		t.Fatalf("captured %d bytes, cap %d", len(got), stdioStderrCap)
+	}
+	if strings.Contains(got, "H") {
+		t.Fatal("head bytes must be dropped once the cap is reached")
+	}
+	if !strings.HasSuffix(got, strings.Repeat("T", 1000)) {
+		t.Fatal("tail must be preserved")
+	}
+	if len(got) != stdioStderrCap {
+		t.Fatalf("full stream should saturate the cap: %d != %d", len(got), stdioStderrCap)
+	}
+
+	// A single write larger than the cap keeps only its tail.
+	var b2 boundedStderr
+	big := bytes.Repeat([]byte("B"), stdioStderrCap+50)
+	if _, err := b2.Write(big); err != nil {
+		t.Fatal(err)
+	}
+	if got := b2.String(); len(got) != stdioStderrCap || !strings.HasSuffix(got, strings.Repeat("B", 50)) {
+		t.Fatalf("oversized write: len=%d, tail=%v", len(got), strings.HasSuffix(got, strings.Repeat("B", 50)))
+	}
+}
+
+// TestManagerCapturesStdioStderrTailWhenLarge verifies a server that floods
+// stderr before failing is diagnosed with the tail (the lines that explain the
+// failure) rather than truncated head. Run with -race: the capture buffer is
+// written by os/exec's copy goroutine and read concurrently by maybeStdioErr,
+// so this also exercises the concurrent read/write path.
+func TestManagerCapturesStdioStderrTailWhenLarge(t *testing.T) {
+	mgr := NewManager(Config{
+		Servers: map[string]ServerConfig{
+			"flood": {
+				Command: "/bin/sh",
+				Args: []string{"-c",
+					"i=0; while [ $i -lt 20000 ]; do echo 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx' >&2; i=$((i+1)); done; echo TAIL-MARKER >&2; exit 1"},
+				Timeout: 10,
+			},
+		},
+	})
+	mgr.Initialize(context.Background())
+	t.Cleanup(func() { _ = mgr.Close() })
+
+	states := mgr.States()
+	if len(states) != 1 {
+		t.Fatalf("states: %+v", states)
+	}
+	if states[0].Status != StatusFailed {
+		t.Fatalf("expected failed state, got %+v", states[0])
+	}
+	if !strings.Contains(states[0].Error, "TAIL-MARKER") {
+		t.Fatalf("expected tail marker in error, got %q", states[0].Error)
+	}
+}
+
+// TestBoundedStderrConcurrent hammers Write/String from multiple goroutines:
+// os/exec's internal copy goroutine writes the capture buffer while the parent
+// reads it from another goroutine (e.g. maybeStdioErr after a failed Connect),
+// so the sink must be safe under concurrent use. Run with -race.
+func TestBoundedStderrConcurrent(t *testing.T) {
+	var b boundedStderr
+	const writers, perWriter = 4, 500
+	done := make(chan struct{}, writers)
+	for i := 0; i < writers; i++ {
+		go func(seed byte) {
+			defer func() { done <- struct{}{} }()
+			for j := 0; j < perWriter; j++ {
+				if _, err := b.Write([]byte{seed}); err != nil {
+					t.Errorf("write: %v", err)
+					return
+				}
+			}
+		}(byte('A' + i))
+	}
+	readerDone := make(chan struct{})
+	go func() {
+		defer close(readerDone)
+		for j := 0; j < 1000; j++ {
+			_ = b.String() // must never race with the writers
+		}
+	}()
+	for i := 0; i < writers; i++ {
+		<-done
+	}
+	<-readerDone
+	if got := b.String(); len(got) > stdioStderrCap {
+		t.Fatalf("captured %d bytes, cap %d", len(got), stdioStderrCap)
+	}
 }

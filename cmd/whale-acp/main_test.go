@@ -1,13 +1,17 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/usewhale/whale/internal/acp"
@@ -504,4 +508,276 @@ func TestContextWindowFromEnv(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestSanitizeLogName verifies control characters are stripped before server
+// names/errors hit the log (log-injection defense), including the C0 controls
+// and DEL beyond newline/CR/tab.
+func TestSanitizeLogName(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"evil\nserver\r\tname", "evil server  name"},
+		{"plain-name", "plain-name"},
+		{"", ""},
+		{"nul\x00esc\x1bdel\x7f", "nul esc del "},
+		{"tab\there", "tab here"},
+	}
+	for _, c := range cases {
+		if got := sanitizeLogName(c.in); got != c.want {
+			t.Errorf("sanitizeLogName(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// TestSortedKeys verifies deterministic iteration order for logs.
+func TestSortedKeys(t *testing.T) {
+	if got := sortedKeys(map[string]int{}); len(got) != 0 {
+		t.Fatalf("empty map: %v", got)
+	}
+	got := sortedKeys(map[string]int{"z": 1, "a": 2, "m": 3})
+	if strings.Join(got, ",") != "a,m,z" {
+		t.Fatalf("sortedKeys = %v, want a,m,z", got)
+	}
+}
+
+// TestWireMCPServersNegativeCacheSkipsFailedServer verifies a server that
+// failed to start is not re-spawned on a subsequent session (per-process
+// negative cache), preventing repeated spawn attempts on session-heavy hosts.
+func TestWireMCPServersNegativeCacheSkipsFailedServer(t *testing.T) {
+	name := "boom-" + fmt.Sprintf("%d", time.Now().UnixNano()) // unique per run
+	dataDir := t.TempDir()
+	cfg := map[string]any{
+		"mcpServers": map[string]any{
+			name: map[string]any{
+				"command": "/nonexistent/definitely-not-a-binary",
+				"timeout": 2,
+			},
+		},
+	}
+	b, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dataDir, "mcp.json"), b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ts, err := tools.NewToolset(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	mgr1, _ := wireMCPServers(ts, dataDir, t.TempDir(), nil)
+	if mgr1 == nil {
+		t.Fatal("first session should attempt the server")
+	}
+	_ = mgr1.Close()
+	mgr2, _ := wireMCPServers(ts, dataDir, t.TempDir(), nil)
+	if mgr2 != nil {
+		t.Fatal("failed server must not be re-spawned in a later session")
+	}
+}
+
+// TestMCPServerKey verifies the negative-cache key separates name, command,
+// and args so distinct servers never collide and identical servers always do.
+func TestMCPServerKey(t *testing.T) {
+	a := mcpServerKey("srv", "/bin/true", []string{"-a"})
+	if a != mcpServerKey("srv", "/bin/true", []string{"-a"}) {
+		t.Fatal("identical servers must share a key")
+	}
+	for name, other := range map[string]func() string{
+		"name differs":    func() string { return mcpServerKey("other", "/bin/true", []string{"-a"}) },
+		"command differs": func() string { return mcpServerKey("srv", "/bin/false", []string{"-a"}) },
+		"arg differs":     func() string { return mcpServerKey("srv", "/bin/true", []string{"-b"}) },
+		"arg order":       func() string { return mcpServerKey("srv", "/bin/true", []string{"-b", "-a"}) },
+	} {
+		if other() == a {
+			t.Errorf("%s: keys must differ", name)
+		}
+	}
+}
+
+// TestIsConsentRefused verifies the consent-refusal marker classification used
+// for log enrichment.
+func TestIsConsentRefused(t *testing.T) {
+	for _, in := range []string{
+		"MCP-CONSENT-REFUSED",
+		"error: MCP-CONSENT-REFUSED: no consent",
+		"exit status 1: MCP-CONSENT-REFUSED",
+		"prefix MCP-CONSENT-REFUSED suffix",
+	} {
+		if !isConsentRefused(in) {
+			t.Errorf("isConsentRefused(%q) = false, want true", in)
+		}
+	}
+	for _, in := range []string{"", "boom", "mcp-consent-refused", "MCP-CONSENT-REFUSE"} {
+		if isConsentRefused(in) {
+			t.Errorf("isConsentRefused(%q) = true, want false", in)
+		}
+	}
+}
+
+// writeMCPConfig writes an mcp.json baseline into dir.
+func writeMCPConfig(t *testing.T, dir string, servers map[string]any) {
+	t.Helper()
+	b, err := json.Marshal(map[string]any{"mcpServers": servers})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "mcp.json"), b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestMCPConfigForSessionLogLines verifies the changed log sites in
+// mcpConfigForSession: the client-supplied server count and the baseline http
+// url-transport warning are both emitted and sanitized.
+func TestMCPConfigForSessionLogLines(t *testing.T) {
+	var logs bytes.Buffer
+	prev := acp.Logger
+	acp.Logger = log.New(&logs, "", 0)
+	defer func() { acp.Logger = prev }()
+
+	dataDir := t.TempDir()
+	writeMCPConfig(t, dataDir, map[string]any{
+		"baseline-http": map[string]any{"url": "http://127.0.0.1:9999"},
+	})
+	client := []acp.MCPServer{
+		{Name: "client-a", Command: "/bin/echo", Args: []string{"hi"}},
+		{Name: "client-b", Command: "/bin/echo", Args: []string{"bye"}},
+	}
+	cfg, err := mcpConfigForSession(dataDir, client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Servers["client-a"].Command; got != "/bin/echo" {
+		t.Fatalf("client server not merged into config: %+v", cfg.Servers["client-a"])
+	}
+	out := logs.String()
+	if !strings.Contains(out, "connecting 2 MCP server(s) supplied by the ACP client") {
+		t.Errorf("missing client-count log line, got:\n%s", out)
+	}
+	if !strings.Contains(out, "baseline mcp server baseline-http uses url transport") {
+		t.Errorf("missing baseline url-transport warning, got:\n%s", out)
+	}
+}
+
+// TestWireMCPServersNegativeCacheKeyedByCommand: the negative cache is keyed by
+// name+command+args — re-entering the same name with a different command must
+// be attempted again, while the original failing key stays cached.
+func TestWireMCPServersNegativeCacheKeyedByCommand(t *testing.T) {
+	name := "keyed-" + fmt.Sprintf("%d", time.Now().UnixNano())
+	dataDir := t.TempDir()
+	write := func(command string) {
+		writeMCPConfig(t, dataDir, map[string]any{
+			name: map[string]any{"command": command, "timeout": 2},
+		})
+	}
+	ts, err := tools.NewToolset(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	write("/nonexistent/bin-one")
+	mgr1, _ := wireMCPServers(ts, dataDir, t.TempDir(), nil)
+	if mgr1 == nil {
+		t.Fatal("first session should attempt the server")
+	}
+	_ = mgr1.Close()
+
+	write("/nonexistent/bin-two") // same name, different command
+	mgr2, _ := wireMCPServers(ts, dataDir, t.TempDir(), nil)
+	if mgr2 == nil {
+		t.Fatal("different command must not be skipped by the cache")
+	}
+	_ = mgr2.Close()
+
+	write("/nonexistent/bin-one") // original key is still cached
+	mgr3, _ := wireMCPServers(ts, dataDir, t.TempDir(), nil)
+	if mgr3 != nil {
+		t.Fatal("original failing key must still be skipped")
+	}
+}
+
+// TestWireMCPServersNegativeCacheConsentRefused: a server that refuses to
+// start without explicit consent (the MCP-CONSENT-REFUSED marker on stderr) is
+// classified in the log and negative-cached like any other startup failure.
+func TestWireMCPServersNegativeCacheConsentRefused(t *testing.T) {
+	name := "consent-" + fmt.Sprintf("%d", time.Now().UnixNano())
+	dataDir := t.TempDir()
+	writeMCPConfig(t, dataDir, map[string]any{
+		name: map[string]any{
+			"command": "/bin/sh",
+			"args":    []string{"-c", "echo MCP-CONSENT-REFUSED >&2; exit 1"},
+			"timeout": 5,
+		},
+	})
+	var logs bytes.Buffer
+	prev := acp.Logger
+	acp.Logger = log.New(&logs, "", 0)
+	defer func() { acp.Logger = prev }()
+
+	ts, err := tools.NewToolset(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	mgr1, _ := wireMCPServers(ts, dataDir, t.TempDir(), nil)
+	if mgr1 == nil {
+		t.Fatal("first session should attempt the server")
+	}
+	_ = mgr1.Close()
+	if !strings.Contains(logs.String(), "refused to start without explicit consent") {
+		t.Fatalf("expected consent-refusal log line, got:\n%s", logs.String())
+	}
+	mgr2, _ := wireMCPServers(ts, dataDir, t.TempDir(), nil)
+	if mgr2 != nil {
+		t.Fatal("consent-refused server must be negative-cached")
+	}
+}
+
+// TestWireMCPServersNegativeCacheConcurrent exercises the shared negative
+// cache from concurrent sessions (whale-acp runs one runtime per session):
+// concurrent reads of a cached failure must all skip, and concurrent stores of
+// distinct failures must not race (run with -race).
+func TestWireMCPServersNegativeCacheConcurrent(t *testing.T) {
+	ts, err := tools.NewToolset(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	primeDir := t.TempDir()
+	prime := "prime-" + fmt.Sprintf("%d", time.Now().UnixNano())
+	writeMCPConfig(t, primeDir, map[string]any{
+		prime: map[string]any{"command": "/nonexistent/bin-prime", "timeout": 2},
+	})
+	mgr, _ := wireMCPServers(ts, primeDir, t.TempDir(), nil)
+	if mgr == nil {
+		t.Fatal("prime should be attempted")
+	}
+	_ = mgr.Close()
+
+	const n = 8
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		i := i
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if i%2 == 0 {
+				// Concurrent reads of the primed (cached) key.
+				if m, _ := wireMCPServers(ts, primeDir, t.TempDir(), nil); m != nil {
+					t.Error("cached failing server must be skipped concurrently")
+					_ = m.Close()
+				}
+			} else {
+				// Concurrent stores of unique failing keys.
+				name := fmt.Sprintf("conc-%d-%d", time.Now().UnixNano(), i)
+				dir := t.TempDir()
+				writeMCPConfig(t, dir, map[string]any{
+					name: map[string]any{"command": "/nonexistent/bin-" + name, "timeout": 2},
+				})
+				if m, _ := wireMCPServers(ts, dir, t.TempDir(), nil); m == nil {
+					t.Error("unique failing server must be attempted")
+				} else {
+					_ = m.Close()
+				}
+			}
+		}()
+	}
+	wg.Wait()
 }

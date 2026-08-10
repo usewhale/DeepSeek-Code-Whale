@@ -358,7 +358,7 @@ func (a *App) ApplyResumeChoice(choice string) (ResumeApplyResult, error) {
 	} else if blocked {
 		return ResumeApplyResult{Message: msg}, nil
 	}
-	a.sessionID = next
+	a.setSessionID(next)
 	modeState, err := session.LoadModeState(a.sessionsDir, a.sessionID)
 	if err != nil {
 		return ResumeApplyResult{}, err

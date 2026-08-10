@@ -170,6 +170,11 @@ type App struct {
 	// the entire refreshMCPTools body so concurrent refreshes serialize and
 	// the last one always observes the latest pluginTools.
 	toolMu sync.Mutex
+	// sessionMu guards sessionID against the MCP startup goroutine, which reads
+	// it during RestorePromotedTools while the dispatch goroutine switches
+	// sessions (resume / session-new / fork). sessionsDir is immutable after
+	// construction and does not need the lock.
+	sessionMu sync.Mutex
 
 	a          *agent.Agent
 	apiKey     string
