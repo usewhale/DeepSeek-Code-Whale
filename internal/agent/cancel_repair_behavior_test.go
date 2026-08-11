@@ -32,12 +32,12 @@ func TestRunStreamCancelCurrentTurn(t *testing.T) {
 	store := NewInMemoryStore()
 	prov := &cancelThenSummaryProvider{}
 	a := NewAgent(prov, store, nil)
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancelCause(context.Background())
 	events, err := a.RunStream(ctx, "s-cancel", "hi")
 	if err != nil {
 		t.Fatalf("run stream failed: %v", err)
 	}
-	time.AfterFunc(10*time.Millisecond, cancel)
+	time.AfterFunc(10*time.Millisecond, func() { cancel(NewUserInterrupt("esc")) })
 
 	seenCancelled := false
 	for ev := range events {
@@ -62,6 +62,46 @@ func TestRunStreamCancelCurrentTurn(t *testing.T) {
 	last := msgs[len(msgs)-1]
 	if last.Role != RoleUser || !last.Hidden || last.FinishReason != FinishReasonCanceled || !strings.Contains(last.Text, "<turn_aborted>") {
 		t.Fatalf("expected hidden interrupt marker, got: %+v", last)
+	}
+	if !strings.Contains(last.Text, "source: esc") {
+		t.Fatalf("expected interrupt source in marker, got: %+v", last)
+	}
+	var canceledAssistant *Message
+	for i := range msgs {
+		if msgs[i].Role == RoleAssistant && msgs[i].FinishReason == FinishReasonCanceled {
+			canceledAssistant = &msgs[i]
+		}
+	}
+	if canceledAssistant == nil || !strings.Contains(canceledAssistant.ErrorDetail, "user interrupt (source: esc)") {
+		t.Fatalf("expected persisted cancellation cause, got: %+v", canceledAssistant)
+	}
+}
+
+func TestRunStreamServiceShutdownDoesNotPersistUserInterruptMarker(t *testing.T) {
+	store := NewInMemoryStore()
+	a := NewAgent(&cancelThenSummaryProvider{}, store, nil)
+	ctx, cancel := context.WithCancelCause(context.Background())
+	time.AfterFunc(10*time.Millisecond, func() { cancel(ErrServiceShutdown) })
+
+	events, err := a.RunStream(ctx, "s-service-shutdown", "hi")
+	if err != nil {
+		t.Fatalf("run stream failed: %v", err)
+	}
+	seenCancelled := false
+	for ev := range events {
+		if ev.Type == AgentEventTypeTurnCancelled {
+			seenCancelled = true
+		}
+	}
+	if !seenCancelled {
+		t.Fatal("expected turn_cancelled event")
+	}
+
+	msgs, _ := store.List(context.Background(), "s-service-shutdown")
+	for _, msg := range msgs {
+		if strings.Contains(msg.Text, "<turn_aborted>") {
+			t.Fatalf("service shutdown must not persist a user interrupt marker: %+v", msg)
+		}
 	}
 }
 

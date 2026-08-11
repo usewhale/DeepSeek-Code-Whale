@@ -5,23 +5,35 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/spf13/cobra"
 
 	"github.com/usewhale/whale/internal/app"
+	"github.com/usewhale/whale/internal/llm/deepseek"
 	"github.com/usewhale/whale/internal/policy"
 	"github.com/usewhale/whale/internal/runtime/protocol"
 	"github.com/usewhale/whale/internal/session"
 	"github.com/usewhale/whale/internal/store"
 	whaleworktree "github.com/usewhale/whale/internal/worktree"
 )
+
+// localExecConfig returns a default config pinned to the local web_search mode:
+// exec tests mock the chat-completions endpoint, and the default (auto) mode
+// would route deepseek-v4-flash through the Responses API.
+func localExecConfig() app.Config {
+	cfg := app.DefaultConfig()
+	cfg.DeepSeekWebSearch = deepseek.WebSearchModeLocal
+	return cfg
+}
 
 func TestRunSetupSavesCredentials(t *testing.T) {
 	dir := t.TempDir()
@@ -235,7 +247,7 @@ func TestAppServerCommandRunsStdioProtocol(t *testing.T) {
 	}
 	defer func() { _ = os.Chdir(oldwd) }()
 
-	opts := &cliOptions{cfg: app.DefaultConfig()}
+	opts := &cliOptions{cfg: localExecConfig()}
 	opts.cfg.DataDir = t.TempDir()
 	root := newRootCmd(opts)
 	var out bytes.Buffer
@@ -272,7 +284,7 @@ func TestPrepareCLIConfigLoadsConfigAndAppliesFlagOverride(t *testing.T) {
 	}
 	defer func() { _ = os.Chdir(oldwd) }()
 
-	opts := &cliOptions{cfg: app.DefaultConfig()}
+	opts := &cliOptions{cfg: localExecConfig()}
 	opts.cfg.DataDir = dataDir
 	root := newRootCmd(opts)
 	if err := root.PersistentFlags().Set("model", "deepseek-v4-flash"); err != nil {
@@ -306,7 +318,7 @@ func TestPrepareCLIConfigPreservesConfiguredThinking(t *testing.T) {
 	}
 	defer func() { _ = os.Chdir(oldwd) }()
 
-	opts := &cliOptions{cfg: app.DefaultConfig()}
+	opts := &cliOptions{cfg: localExecConfig()}
 	opts.cfg.DataDir = dataDir
 	root := newRootCmd(opts)
 	if err := prepareCLIConfig(root, opts); err != nil {
@@ -334,7 +346,7 @@ func TestPrepareCLIConfigExplicitThinkingFalseOverridesConfig(t *testing.T) {
 	}
 	defer func() { _ = os.Chdir(oldwd) }()
 
-	opts := &cliOptions{cfg: app.DefaultConfig()}
+	opts := &cliOptions{cfg: localExecConfig()}
 	opts.cfg.DataDir = dataDir
 	root := newRootCmd(opts)
 	if err := root.PersistentFlags().Set("thinking", "false"); err != nil {
@@ -373,7 +385,7 @@ func TestPrepareCLIConfigExplicitThinkingTrueOverridesConfig(t *testing.T) {
 	}
 	defer func() { _ = os.Chdir(oldwd) }()
 
-	opts := &cliOptions{cfg: app.DefaultConfig()}
+	opts := &cliOptions{cfg: localExecConfig()}
 	opts.cfg.DataDir = dataDir
 	root := newRootCmd(opts)
 	if err := root.PersistentFlags().Set("thinking", "true"); err != nil {
@@ -403,7 +415,7 @@ func TestPrepareCLIConfigExplicitEffortOverridesConfig(t *testing.T) {
 	}
 	defer func() { _ = os.Chdir(oldwd) }()
 
-	opts := &cliOptions{cfg: app.DefaultConfig()}
+	opts := &cliOptions{cfg: localExecConfig()}
 	opts.cfg.DataDir = dataDir
 	root := newRootCmd(opts)
 	if err := root.PersistentFlags().Set("effort", "max"); err != nil {
@@ -438,7 +450,7 @@ func TestPrepareCLIConfigDangerouslySkipPermissionsOverridesConfig(t *testing.T)
 	}
 	defer func() { _ = os.Chdir(oldwd) }()
 
-	opts := &cliOptions{cfg: app.DefaultConfig()}
+	opts := &cliOptions{cfg: localExecConfig()}
 	opts.cfg.DataDir = dataDir
 	root := newRootCmd(opts)
 	if err := root.PersistentFlags().Set("dangerously-skip-permissions", "true"); err != nil {
@@ -471,7 +483,7 @@ func TestPrepareCLIConfigDangerouslySkipPermissionsAppliesToSubcommands(t *testi
 	}
 	defer func() { _ = os.Chdir(oldwd) }()
 
-	opts := &cliOptions{cfg: app.DefaultConfig()}
+	opts := &cliOptions{cfg: localExecConfig()}
 	root := newRootCmd(opts)
 	if err := root.PersistentFlags().Set("dangerously-skip-permissions", "true"); err != nil {
 		t.Fatalf("set dangerously-skip-permissions: %v", err)
@@ -501,7 +513,7 @@ func TestPrepareWorktreeRunsBeforeConfigLoad(t *testing.T) {
 	}
 	defer func() { _ = os.Chdir(oldwd) }()
 
-	opts := &cliOptions{cfg: app.DefaultConfig()}
+	opts := &cliOptions{cfg: localExecConfig()}
 	opts.cfg.DataDir = t.TempDir()
 	root := newRootCmd(opts)
 	if err := root.PersistentFlags().Set("worktree", "feature/test"); err != nil {
@@ -542,7 +554,7 @@ func TestPrepareWorktreePreservesSubdirectoryWorkspace(t *testing.T) {
 	}
 	defer func() { _ = os.Chdir(oldwd) }()
 
-	opts := &cliOptions{cfg: app.DefaultConfig()}
+	opts := &cliOptions{cfg: localExecConfig()}
 	opts.cfg.DataDir = t.TempDir()
 	root := newRootCmd(opts)
 	if err := root.PersistentFlags().Set("worktree", "subdir"); err != nil {
@@ -572,7 +584,7 @@ func TestUnsupportedSubcommandsRejectWorktree(t *testing.T) {
 		{"resume", "--worktree=x"},
 		{"setup", "--worktree=x"},
 	} {
-		opts := &cliOptions{cfg: app.DefaultConfig()}
+		opts := &cliOptions{cfg: localExecConfig()}
 		root := newRootCmd(opts)
 		var out bytes.Buffer
 		root.SetOut(&out)
@@ -596,7 +608,7 @@ func TestPrepareCLIConfigRejectsUnsupportedEffortAlias(t *testing.T) {
 	}
 	defer func() { _ = os.Chdir(oldwd) }()
 
-	opts := &cliOptions{cfg: app.DefaultConfig()}
+	opts := &cliOptions{cfg: localExecConfig()}
 	root := newRootCmd(opts)
 	if err := root.PersistentFlags().Set("effort", "xhigh"); err != nil {
 		t.Fatalf("set effort: %v", err)
@@ -630,7 +642,7 @@ func TestPrepareCLIConfigKeepsUnspecifiedThinkingAndEffortFromConfig(t *testing.
 	}
 	defer func() { _ = os.Chdir(oldwd) }()
 
-	opts := &cliOptions{cfg: app.DefaultConfig()}
+	opts := &cliOptions{cfg: localExecConfig()}
 	opts.cfg.DataDir = dataDir
 	root := newRootCmd(opts)
 	if err := prepareCLIConfig(root, opts); err != nil {
@@ -652,6 +664,333 @@ func TestReadExecPromptPrefersArg(t *testing.T) {
 	if got != "arg prompt" {
 		t.Fatalf("prompt = %q", got)
 	}
+}
+
+func TestExecHelpShowsSessionAndMode(t *testing.T) {
+	opts := &cliOptions{cfg: localExecConfig()}
+	root := newRootCmd(opts)
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(io.Discard)
+	root.SetArgs([]string{"exec", "--help"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("exec --help: %v", err)
+	}
+	help := out.String()
+	for _, want := range []string{"--session", "--mode", "agent", "ask", "plan", "overrides the session's saved mode"} {
+		if !strings.Contains(help, want) {
+			t.Fatalf("exec --help missing %q:\n%s", want, help)
+		}
+	}
+}
+
+func TestRootHelpHidesSessionAndMode(t *testing.T) {
+	opts := &cliOptions{cfg: localExecConfig()}
+	root := newRootCmd(opts)
+	var out bytes.Buffer
+	root.SetOut(&out)
+	root.SetErr(io.Discard)
+	root.SetArgs([]string{"--help"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("root --help: %v", err)
+	}
+	help := out.String()
+	for _, flag := range []string{"--session", "--mode"} {
+		if strings.Contains(help, flag+" ") || strings.Contains(help, flag+"=") {
+			t.Fatalf("root help must not expose %s flag:\n%s", flag, help)
+		}
+	}
+}
+
+func TestExecCombinedArgsParse(t *testing.T) {
+	opts := &cliOptions{cfg: localExecConfig()}
+	root := newRootCmd(opts)
+	execCmd, _, err := root.Find([]string{"exec"})
+	if err != nil {
+		t.Fatalf("find exec: %v", err)
+	}
+	args := []string{"--json", "--timeout-sec", "60", "--attach", "a.txt", "--session", "s1", "--mode", "agent", "--model", "deepseek-v4-flash", "--effort", "high", "prompt"}
+	if err := execCmd.ParseFlags(args); err != nil {
+		t.Fatalf("combined args must parse: %v", err)
+	}
+	if got, _ := execCmd.Flags().GetString("session"); got != "s1" {
+		t.Fatalf("session = %q, want s1", got)
+	}
+	if got, _ := execCmd.Flags().GetString("mode"); got != "agent" {
+		t.Fatalf("mode = %q, want agent", got)
+	}
+}
+
+func TestExecRunERejectsInvalidModeBeforeProvider(t *testing.T) {
+	t.Setenv("DEEPSEEK_API_KEY", "sk-1234567890abcdef1234")
+	var mu sync.Mutex
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requests++
+		mu.Unlock()
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+	t.Setenv("DEEPSEEK_BASE_URL", srv.URL)
+
+	for _, m := range []string{"wat", "   "} {
+		dir := t.TempDir()
+		workspace := t.TempDir()
+		oldwd, err := os.Getwd()
+		if err != nil {
+			t.Fatalf("Getwd: %v", err)
+		}
+		if err := os.Chdir(workspace); err != nil {
+			t.Fatalf("Chdir: %v", err)
+		}
+
+		opts := &cliOptions{cfg: localExecConfig()}
+		opts.cfg.DataDir = dir
+		root := newRootCmd(opts)
+		root.SetArgs([]string{"exec", "--mode", m, "hi"})
+		root.SetOut(io.Discard)
+		root.SetErr(io.Discard)
+		err = root.Execute()
+		_ = os.Chdir(oldwd)
+		if err == nil {
+			t.Fatalf("expected invalid mode %q to fail", m)
+		}
+		if !app.IsInvalidModeError(err) {
+			t.Fatalf("expected InvalidModeError for %q, got %T: %v", m, err, err)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if requests != 0 {
+		t.Fatalf("expected zero provider requests for invalid mode, got %d", requests)
+	}
+}
+
+func TestExecInvalidModeDoesNotCreateWorktree(t *testing.T) {
+	t.Setenv("DEEPSEEK_API_KEY", "sk-1234567890abcdef1234")
+	repo := newCLIGitRepo(t)
+	oldwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	if err := os.Chdir(repo); err != nil {
+		t.Fatalf("Chdir: %v", err)
+	}
+	defer func() { _ = os.Chdir(oldwd) }()
+
+	opts := &cliOptions{cfg: localExecConfig()}
+	opts.cfg.DataDir = t.TempDir()
+	root := newRootCmd(opts)
+	root.SetArgs([]string{"exec", "--worktree=feature-x", "--mode", "bogus", "hi"})
+	root.SetOut(io.Discard)
+	root.SetErr(io.Discard)
+	if err := root.Execute(); err == nil {
+		t.Fatal("expected invalid mode to fail")
+	} else if !app.IsInvalidModeError(err) {
+		t.Fatalf("expected InvalidModeError, got %T: %v", err, err)
+	}
+	if _, err := os.Stat(filepath.Join(repo, ".whale", "worktrees", "feature-x")); !os.IsNotExist(err) {
+		t.Fatalf("invalid mode must not create a worktree: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(repo, ".whale")); !os.IsNotExist(err) {
+		t.Fatalf("invalid mode must not create .whale directories: %v", err)
+	}
+}
+
+func TestExecJSONErrorOutputOnce(t *testing.T) {
+	t.Setenv("DEEPSEEK_API_KEY", "sk-1234567890abcdef1234")
+	srv := newExecTestServer(t, "never reached")
+	defer srv.Close()
+	t.Setenv("DEEPSEEK_BASE_URL", srv.URL)
+
+	dir := t.TempDir()
+	workspace := t.TempDir()
+	oldwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	if err := os.Chdir(workspace); err != nil {
+		t.Fatalf("Chdir: %v", err)
+	}
+	defer func() { _ = os.Chdir(oldwd) }()
+
+	var out bytes.Buffer
+	opts := &cliOptions{cfg: localExecConfig()}
+	opts.cfg.DataDir = dir
+	root := newRootCmd(opts)
+	root.SetOut(&out)
+	root.SetErr(io.Discard)
+	root.SetArgs([]string{"exec", "--json", "--session", "missing", "hi"})
+	err = root.Execute()
+	if err == nil {
+		t.Fatal("expected rejected resume to fail")
+	}
+	code, ok := ExitCode(err)
+	if !ok || code != 1 {
+		t.Fatalf("expected ExitError{Code:1}, got %v", err)
+	}
+	raw := out.String()
+	if n := strings.Count(raw, "{"); n != 1 {
+		t.Fatalf("expected exactly one JSON error result, got %d objects:\n%s", n, raw)
+	}
+	var res app.ExecResult
+	if err := json.Unmarshal(out.Bytes(), &res); err != nil {
+		t.Fatalf("unmarshal json error: %v\n%s", err, raw)
+	}
+	if res.Status != "error" || res.Error == "" {
+		t.Fatalf("expected status=error with message, got %+v", res)
+	}
+}
+
+func TestExecJSONErrorNotDoubleEmittedOnRunFailure(t *testing.T) {
+	t.Setenv("DEEPSEEK_API_KEY", "sk-1234567890abcdef1234")
+	srv := newExecTestServer(t, "ok")
+	defer srv.Close()
+	t.Setenv("DEEPSEEK_BASE_URL", srv.URL)
+
+	dir := t.TempDir()
+	workspace := t.TempDir()
+	oldwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	if err := os.Chdir(workspace); err != nil {
+		t.Fatalf("Chdir: %v", err)
+	}
+	defer func() { _ = os.Chdir(oldwd) }()
+
+	var out bytes.Buffer
+	opts := &cliOptions{cfg: localExecConfig()}
+	opts.cfg.DataDir = dir
+	root := newRootCmd(opts)
+	root.SetOut(&out)
+	root.SetErr(io.Discard)
+	root.SetArgs([]string{"exec", "--json", "hi"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("successful exec should not error: %v", err)
+	}
+	if n := strings.Count(out.String(), "{"); n != 1 {
+		t.Fatalf("expected exactly one JSON result, got %d objects:\n%s", n, out.String())
+	}
+	var res app.ExecResult
+	if err := json.Unmarshal(out.Bytes(), &res); err != nil {
+		t.Fatalf("unmarshal json: %v\n%s", err, out.String())
+	}
+	if res.Status != "completed" || res.SessionID == "" {
+		t.Fatalf("expected completed result with session id, got %+v", res)
+	}
+}
+
+func TestExecJSONRuntimeFailureDoesNotPolluteStderr(t *testing.T) {
+	t.Setenv("DEEPSEEK_API_KEY", "sk-1234567890abcdef1234")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusBadRequest)
+	}))
+	defer srv.Close()
+	t.Setenv("DEEPSEEK_BASE_URL", srv.URL)
+
+	dir := t.TempDir()
+	workspace := t.TempDir()
+	oldwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	if err := os.Chdir(workspace); err != nil {
+		t.Fatalf("Chdir: %v", err)
+	}
+	defer func() { _ = os.Chdir(oldwd) }()
+
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	opts := &cliOptions{cfg: localExecConfig()}
+	opts.cfg.DataDir = dir
+	root := newRootCmd(opts)
+	root.SetOut(&out)
+	root.SetErr(&errOut)
+	root.SetArgs([]string{"exec", "--json", "hi"})
+	if err := root.Execute(); err == nil {
+		t.Fatal("expected runtime failure to fail exec")
+	}
+	if n := strings.Count(out.String(), "{"); n != 1 {
+		t.Fatalf("expected exactly one JSON result, got %d objects:\n%s", n, out.String())
+	}
+	var res app.ExecResult
+	if err := json.Unmarshal(out.Bytes(), &res); err != nil {
+		t.Fatalf("unmarshal json: %v\n%s", err, out.String())
+	}
+	if res.Status != "error" || res.Error == "" {
+		t.Fatalf("expected status=error with message, got %+v", res)
+	}
+	if got := errOut.String(); strings.Contains(got, "Error:") || strings.Contains(got, "Usage:") {
+		t.Fatalf("cobra must not pollute stderr after a JSON error result:\n%s", got)
+	}
+}
+
+func TestExecRunEAcceptsExplicitValidMode(t *testing.T) {
+	t.Setenv("DEEPSEEK_API_KEY", "sk-1234567890abcdef1234")
+	srv := newExecTestServer(t, "ok")
+	defer srv.Close()
+	t.Setenv("DEEPSEEK_BASE_URL", srv.URL)
+
+	dir := t.TempDir()
+	workspace := t.TempDir()
+	oldwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	if err := os.Chdir(workspace); err != nil {
+		t.Fatalf("Chdir: %v", err)
+	}
+	defer func() { _ = os.Chdir(oldwd) }()
+
+	var out bytes.Buffer
+	opts := &cliOptions{cfg: localExecConfig()}
+	opts.cfg.DataDir = dir
+	root := newRootCmd(opts)
+	root.SetOut(&out)
+	root.SetArgs([]string{"exec", "--mode", "ASK", "hi"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("exec with ASK should succeed: %v", err)
+	}
+}
+
+func TestExecModeFlagValidation(t *testing.T) {
+	opts := &cliOptions{cfg: localExecConfig()}
+	execCmd, _, err := newRootCmd(opts).Find([]string{"exec"})
+	if err != nil {
+		t.Fatalf("find exec: %v", err)
+	}
+
+	t.Run("valid modes accepted case-insensitively", func(t *testing.T) {
+		for _, m := range []string{"agent", "ASK", "Plan"} {
+			execCmd.Flags().Set("mode", m)
+			if !flagChanged(execCmd, "mode") {
+				t.Fatalf("mode flag not marked changed for %q", m)
+			}
+		}
+	})
+
+	t.Run("invalid mode rejected", func(t *testing.T) {
+		execCmd.Flags().Set("mode", "wat")
+		if !flagChanged(execCmd, "mode") {
+			t.Fatal("mode flag not marked changed")
+		}
+		if _, err := session.ParseMode("wat"); err == nil {
+			t.Fatal("expected ParseMode to reject invalid mode")
+		}
+	})
+
+	t.Run("blank explicit mode rejected", func(t *testing.T) {
+		if _, err := session.ParseMode("   "); err != nil {
+			t.Fatalf("ParseMode(blank) must keep Agent semantics: %v", err)
+		}
+		mode, err := session.ParseMode("")
+		if err != nil || mode != session.ModeAgent {
+			t.Fatalf("ParseMode(\"\") = %q, %v; want agent", mode, err)
+		}
+	})
 }
 
 func TestReadExecPromptFallsBackToStdin(t *testing.T) {
@@ -683,9 +1022,9 @@ func TestRunExecTextOutput(t *testing.T) {
 
 	var out bytes.Buffer
 	var errOut bytes.Buffer
-	opts := &cliOptions{cfg: app.DefaultConfig()}
+	opts := &cliOptions{cfg: localExecConfig()}
 	opts.cfg.DataDir = dir
-	if err := runExec(&out, &errOut, strings.NewReader(""), opts, []string{"hi"}, false, 0, nil); err != nil {
+	if err := runExec(&out, &errOut, strings.NewReader(""), opts, []string{"hi"}, false, 0, nil, "", ""); err != nil {
 		t.Fatalf("runExec: %v", err)
 	}
 	if got := out.String(); got != "hello from exec\n" {
@@ -715,9 +1054,9 @@ func TestRunExecJSONOutput(t *testing.T) {
 
 	var out bytes.Buffer
 	var errOut bytes.Buffer
-	opts := &cliOptions{cfg: app.DefaultConfig()}
+	opts := &cliOptions{cfg: localExecConfig()}
 	opts.cfg.DataDir = dir
-	if err := runExec(&out, &errOut, strings.NewReader("stdin prompt"), opts, nil, true, 0, nil); err != nil {
+	if err := runExec(&out, &errOut, strings.NewReader("stdin prompt"), opts, nil, true, 0, nil, "", ""); err != nil {
 		t.Fatalf("runExec: %v", err)
 	}
 	var res app.ExecResult
@@ -732,6 +1071,634 @@ func TestRunExecJSONOutput(t *testing.T) {
 	}
 	if errOut.Len() != 0 {
 		t.Fatalf("stderr = %q", errOut.String())
+	}
+}
+
+func TestRunExecResumeSeededEmptySessionAppendsHistory(t *testing.T) {
+	t.Setenv("DEEPSEEK_API_KEY", "sk-1234567890abcdef1234")
+	srv := newExecTestServer(t, "first round ok")
+	defer srv.Close()
+	t.Setenv("DEEPSEEK_BASE_URL", srv.URL)
+
+	dir := t.TempDir()
+	workspace := t.TempDir()
+	sessionsDir := filepath.Join(dir, "sessions")
+	if err := os.MkdirAll(sessionsDir, 0o755); err != nil {
+		t.Fatalf("mkdir sessions: %v", err)
+	}
+	sessionFile := filepath.Join(sessionsDir, "run-1.jsonl")
+	if err := os.WriteFile(sessionFile, nil, 0o600); err != nil {
+		t.Fatalf("seed empty session: %v", err)
+	}
+
+	oldwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	if err := os.Chdir(workspace); err != nil {
+		t.Fatalf("Chdir: %v", err)
+	}
+	defer func() { _ = os.Chdir(oldwd) }()
+
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	opts := &cliOptions{cfg: localExecConfig()}
+	opts.cfg.DataDir = dir
+	if err := runExec(&out, &errOut, strings.NewReader("first round"), opts, nil, true, 0, nil, "run-1", ""); err != nil {
+		t.Fatalf("runExec on seeded empty session: %v", err)
+	}
+	var res app.ExecResult
+	if err := json.Unmarshal(out.Bytes(), &res); err != nil {
+		t.Fatalf("unmarshal json: %v\n%s", err, out.String())
+	}
+	if res.SessionID != "run-1" {
+		t.Fatalf("session = %q, want run-1", res.SessionID)
+	}
+	raw, err := os.ReadFile(sessionFile)
+	if err != nil {
+		t.Fatalf("read session: %v", err)
+	}
+	if !strings.Contains(string(raw), "first round") {
+		t.Fatalf("expected round appended to seeded session, got:\n%s", raw)
+	}
+}
+
+func TestRunExecResumeSessionAppendsHistory(t *testing.T) {
+	t.Setenv("DEEPSEEK_API_KEY", "sk-1234567890abcdef1234")
+	srv := newExecTestServer(t, "round two")
+	defer srv.Close()
+	t.Setenv("DEEPSEEK_BASE_URL", srv.URL)
+
+	dir := t.TempDir()
+	workspace := t.TempDir()
+	sessionsDir := filepath.Join(dir, "sessions")
+	if err := os.MkdirAll(sessionsDir, 0o755); err != nil {
+		t.Fatalf("mkdir sessions: %v", err)
+	}
+	first := filepath.Join(sessionsDir, "s1.jsonl")
+	if err := os.WriteFile(first, []byte(`{"SessionID":"s1","Role":"user","Text":"first round"}`+"\n"), 0o600); err != nil {
+		t.Fatalf("write first round: %v", err)
+	}
+
+	oldwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	if err := os.Chdir(workspace); err != nil {
+		t.Fatalf("Chdir: %v", err)
+	}
+	defer func() { _ = os.Chdir(oldwd) }()
+
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	opts := &cliOptions{cfg: localExecConfig()}
+	opts.cfg.DataDir = dir
+	if err := runExec(&out, &errOut, strings.NewReader("second round"), opts, nil, true, 0, nil, "s1", ""); err != nil {
+		t.Fatalf("runExec resume: %v", err)
+	}
+	var res app.ExecResult
+	if err := json.Unmarshal(out.Bytes(), &res); err != nil {
+		t.Fatalf("unmarshal json: %v\n%s", err, out.String())
+	}
+	if res.SessionID != "s1" {
+		t.Fatalf("session = %q, want s1", res.SessionID)
+	}
+	raw, err := os.ReadFile(first)
+	if err != nil {
+		t.Fatalf("read session: %v", err)
+	}
+	content := string(raw)
+	if !strings.Contains(content, "first round") || !strings.Contains(content, "second round") {
+		t.Fatalf("expected both rounds appended to same jsonl, got:\n%s", content)
+	}
+}
+
+func TestRunExecResumeRestoresWorktreeContext(t *testing.T) {
+	t.Setenv("DEEPSEEK_API_KEY", "sk-1234567890abcdef1234")
+	requests := make(chan map[string]any, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Errorf("decode request: %v", err)
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		requests <- payload
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprintf(w, "data: {\"choices\":[{\"delta\":{\"content\":%q},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}\n\n", "resumed")
+		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+	t.Setenv("DEEPSEEK_BASE_URL", srv.URL)
+
+	dataDir := t.TempDir()
+	sessionsDir := filepath.Join(dataDir, "sessions")
+	if err := os.MkdirAll(sessionsDir, 0o755); err != nil {
+		t.Fatalf("mkdir sessions: %v", err)
+	}
+	worktreePath := t.TempDir()
+	subdir := filepath.Join(worktreePath, "packages", "api")
+	if err := os.MkdirAll(subdir, 0o755); err != nil {
+		t.Fatalf("mkdir subdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sessionsDir, "s1.jsonl"), []byte(`{"SessionID":"s1","Role":"user","Text":"hi"}`+"\n"), 0o600); err != nil {
+		t.Fatalf("write session: %v", err)
+	}
+	if err := session.SaveSessionMeta(sessionsDir, "s1", session.SessionMeta{
+		Workspace:          subdir,
+		Branch:             "worktree-feature",
+		WorktreeName:       "feature",
+		WorktreePath:       worktreePath,
+		WorktreeBranch:     "worktree-feature",
+		OriginalWorkspace:  "/tmp/original",
+		OriginalBranch:     "main",
+		OriginalHeadCommit: "abc123",
+	}); err != nil {
+		t.Fatalf("save meta: %v", err)
+	}
+
+	oldwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	if err := os.Chdir(subdir); err != nil {
+		t.Fatalf("Chdir: %v", err)
+	}
+	defer func() { _ = os.Chdir(oldwd) }()
+
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	opts := &cliOptions{cfg: localExecConfig()}
+	opts.cfg.DataDir = dataDir
+	if err := runExec(&out, &errOut, strings.NewReader("resume round"), opts, nil, true, 0, nil, "s1", ""); err != nil {
+		t.Fatalf("runExec resume: %v", err)
+	}
+	var payload map[string]any
+	select {
+	case payload = <-requests:
+	default:
+		t.Fatal("expected exec request payload")
+	}
+	messages, ok := payload["messages"].([]any)
+	if !ok {
+		t.Fatalf("messages = %+v", payload["messages"])
+	}
+	for _, item := range messages {
+		message, _ := item.(map[string]any)
+		content, _ := message["content"].(string)
+		if strings.Contains(content, "Current worktree root: "+worktreePath) {
+			return
+		}
+	}
+	t.Fatalf("resumed round lost the recorded worktree context: %+v", messages)
+}
+
+func TestRunExecResumeUnknownSessionFails(t *testing.T) {
+	t.Setenv("DEEPSEEK_API_KEY", "sk-1234567890abcdef1234")
+	var mu sync.Mutex
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requests++
+		mu.Unlock()
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+	t.Setenv("DEEPSEEK_BASE_URL", srv.URL)
+
+	dir := t.TempDir()
+	workspace := t.TempDir()
+	oldwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	if err := os.Chdir(workspace); err != nil {
+		t.Fatalf("Chdir: %v", err)
+	}
+	defer func() { _ = os.Chdir(oldwd) }()
+
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	opts := &cliOptions{cfg: localExecConfig()}
+	opts.cfg.DataDir = dir
+	if err := runExec(&out, &errOut, strings.NewReader("hi"), opts, nil, true, 0, nil, "missing", ""); err == nil {
+		t.Fatal("expected resume of unknown session to fail")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if requests != 0 {
+		t.Fatalf("expected zero provider requests on rejected resume, got %d", requests)
+	}
+	if entries, err := os.ReadDir(filepath.Join(dir, "sessions")); err == nil && len(entries) > 0 {
+		t.Fatalf("expected zero session state writes, found: %v", entries)
+	}
+}
+
+func TestRunExecPlanModeSingleRoundExits(t *testing.T) {
+	t.Setenv("DEEPSEEK_API_KEY", "sk-1234567890abcdef1234")
+	srv := newExecTestServer(t, "here is the plan")
+	defer srv.Close()
+	t.Setenv("DEEPSEEK_BASE_URL", srv.URL)
+
+	dir := t.TempDir()
+	workspace := t.TempDir()
+	oldwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	if err := os.Chdir(workspace); err != nil {
+		t.Fatalf("Chdir: %v", err)
+	}
+	defer func() { _ = os.Chdir(oldwd) }()
+
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	opts := &cliOptions{cfg: localExecConfig()}
+	opts.cfg.DataDir = dir
+	if err := runExec(&out, &errOut, strings.NewReader("plan this"), opts, nil, false, 0, nil, "", "plan"); err != nil {
+		t.Fatalf("runExec plan mode: %v", err)
+	}
+	if !strings.Contains(out.String(), "here is the plan") {
+		t.Fatalf("expected plan output, got %q", out.String())
+	}
+	if errOut.Len() != 0 {
+		t.Fatalf("stderr = %q", errOut.String())
+	}
+}
+
+func TestRunExecResumeSavesExplicitModeForNextRound(t *testing.T) {
+	t.Setenv("DEEPSEEK_API_KEY", "sk-1234567890abcdef1234")
+	srv := newExecTestServer(t, "ok")
+	defer srv.Close()
+	t.Setenv("DEEPSEEK_BASE_URL", srv.URL)
+
+	dir := t.TempDir()
+	workspace := t.TempDir()
+	sessionsDir := filepath.Join(dir, "sessions")
+	if err := os.MkdirAll(sessionsDir, 0o755); err != nil {
+		t.Fatalf("mkdir sessions: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sessionsDir, "s1.jsonl"), []byte(`{"SessionID":"s1","Role":"user","Text":"first"}`+"\n"), 0o600); err != nil {
+		t.Fatalf("write session: %v", err)
+	}
+
+	oldwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	if err := os.Chdir(workspace); err != nil {
+		t.Fatalf("Chdir: %v", err)
+	}
+	defer func() { _ = os.Chdir(oldwd) }()
+
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	opts := &cliOptions{cfg: localExecConfig()}
+	opts.cfg.DataDir = dir
+	if err := runExec(&out, &errOut, strings.NewReader("plan this"), opts, nil, true, 0, nil, "s1", "plan"); err != nil {
+		t.Fatalf("runExec with explicit mode: %v", err)
+	}
+	st, err := session.LoadModeState(sessionsDir, "s1")
+	if err != nil {
+		t.Fatalf("load mode: %v", err)
+	}
+	if st.Mode != session.ModePlan {
+		t.Fatalf("explicit mode not persisted for next round, got %q", st.Mode)
+	}
+
+	out.Reset()
+	errOut.Reset()
+	if err := runExec(&out, &errOut, strings.NewReader("again"), opts, nil, true, 0, nil, "s1", ""); err != nil {
+		t.Fatalf("runExec without mode: %v", err)
+	}
+	st, err = session.LoadModeState(sessionsDir, "s1")
+	if err != nil {
+		t.Fatalf("load mode after next round: %v", err)
+	}
+	if st.Mode != session.ModePlan {
+		t.Fatalf("saved mode not carried to next round, got %q", st.Mode)
+	}
+}
+
+func TestRunExecRejectedResumeDoesNotSaveMode(t *testing.T) {
+	t.Setenv("DEEPSEEK_API_KEY", "sk-1234567890abcdef1234")
+	srv := newExecTestServer(t, "never reached")
+	defer srv.Close()
+	t.Setenv("DEEPSEEK_BASE_URL", srv.URL)
+
+	dir := t.TempDir()
+	workspace := t.TempDir()
+	oldwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	if err := os.Chdir(workspace); err != nil {
+		t.Fatalf("Chdir: %v", err)
+	}
+	defer func() { _ = os.Chdir(oldwd) }()
+
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	opts := &cliOptions{cfg: localExecConfig()}
+	opts.cfg.DataDir = dir
+	if err := runExec(&out, &errOut, strings.NewReader("hi"), opts, nil, true, 0, nil, "missing", "plan"); err == nil {
+		t.Fatal("expected rejected resume to fail")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "sessions", "missing.state.json")); err == nil {
+		t.Fatal("explicit mode must not be saved when pre-checks fail")
+	}
+}
+
+func TestValidateResumeTargetWorktreeSessionFromOriginalWorkspace(t *testing.T) {
+	dataDir := t.TempDir()
+	sessionsDir := filepath.Join(dataDir, "sessions")
+	if err := os.MkdirAll(sessionsDir, 0o755); err != nil {
+		t.Fatalf("mkdir sessions: %v", err)
+	}
+	worktreePath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(sessionsDir, "s1.jsonl"), []byte(`{"SessionID":"s1","Role":"user","Text":"hi"}`+"\n"), 0o600); err != nil {
+		t.Fatalf("write session: %v", err)
+	}
+	if err := session.SaveSessionMeta(sessionsDir, "s1", session.SessionMeta{
+		Workspace:         worktreePath,
+		WorktreeName:      "feature",
+		WorktreePath:      worktreePath,
+		WorktreeBranch:    "worktree-feature",
+		OriginalWorkspace: "/tmp/original",
+		OriginalBranch:    "main",
+	}); err != nil {
+		t.Fatalf("save meta: %v", err)
+	}
+
+	originalWorkspace := t.TempDir()
+	target, err := app.ValidateResumeTarget(app.Config{DataDir: dataDir}, app.StartOptions{SessionID: "s1"}, originalWorkspace)
+	if err != nil {
+		t.Fatalf("worktree session resumed from original workspace must pass: %v", err)
+	}
+	if target.Session.Path != worktreePath {
+		t.Fatalf("target path = %q, want %q", target.Session.Path, worktreePath)
+	}
+}
+
+func TestValidateResumeTargetWorktreeSubdirWorkspace(t *testing.T) {
+	dataDir := t.TempDir()
+	sessionsDir := filepath.Join(dataDir, "sessions")
+	if err := os.MkdirAll(sessionsDir, 0o755); err != nil {
+		t.Fatalf("mkdir sessions: %v", err)
+	}
+	worktreePath := t.TempDir()
+	subdir := filepath.Join(worktreePath, "src")
+	if err := os.MkdirAll(subdir, 0o755); err != nil {
+		t.Fatalf("mkdir subdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sessionsDir, "s1.jsonl"), []byte(`{"SessionID":"s1","Role":"user","Text":"hi"}`+"\n"), 0o600); err != nil {
+		t.Fatalf("write session: %v", err)
+	}
+	if err := session.SaveSessionMeta(sessionsDir, "s1", session.SessionMeta{
+		Workspace:         subdir,
+		WorktreeName:      "feature",
+		WorktreePath:      worktreePath,
+		WorktreeBranch:    "worktree-feature",
+		OriginalWorkspace: "/tmp/original",
+		OriginalBranch:    "main",
+	}); err != nil {
+		t.Fatalf("save meta: %v", err)
+	}
+
+	originalWorkspace := t.TempDir()
+	decision, err := app.ValidateResumeTarget(app.Config{DataDir: dataDir}, app.StartOptions{SessionID: "s1"}, originalWorkspace)
+	if err != nil {
+		t.Fatalf("worktree session with subdir workspace resumed from original workspace must pass: %v", err)
+	}
+	if decision.Session.Path != worktreePath {
+		t.Fatalf("decision path = %q, want worktree root %q", decision.Session.Path, worktreePath)
+	}
+	if decision.Session.Workspace != subdir {
+		t.Fatalf("decision workspace = %q, want subdir %q", decision.Session.Workspace, subdir)
+	}
+	if decision.TargetWorkspace != subdir {
+		t.Fatalf("decision target workspace = %q, want subdir %q", decision.TargetWorkspace, subdir)
+	}
+}
+
+func TestRunExecResumeKeepsSavedMode(t *testing.T) {
+	t.Setenv("DEEPSEEK_API_KEY", "sk-1234567890abcdef1234")
+	srv := newExecTestServer(t, "ok")
+	defer srv.Close()
+	t.Setenv("DEEPSEEK_BASE_URL", srv.URL)
+
+	dir := t.TempDir()
+	workspace := t.TempDir()
+	sessionsDir := filepath.Join(dir, "sessions")
+	if err := os.MkdirAll(sessionsDir, 0o755); err != nil {
+		t.Fatalf("mkdir sessions: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sessionsDir, "s1.jsonl"), []byte(`{"SessionID":"s1","Role":"user","Text":"first"}`+"\n"), 0o600); err != nil {
+		t.Fatalf("write session: %v", err)
+	}
+	if err := session.SaveModeState(sessionsDir, "s1", session.ModePlan); err != nil {
+		t.Fatalf("save mode: %v", err)
+	}
+
+	oldwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	if err := os.Chdir(workspace); err != nil {
+		t.Fatalf("Chdir: %v", err)
+	}
+	defer func() { _ = os.Chdir(oldwd) }()
+
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	opts := &cliOptions{cfg: localExecConfig()}
+	opts.cfg.DataDir = dir
+	if err := runExec(&out, &errOut, strings.NewReader("again"), opts, nil, true, 0, nil, "s1", ""); err != nil {
+		t.Fatalf("runExec resume: %v", err)
+	}
+	var res app.ExecResult
+	if err := json.Unmarshal(out.Bytes(), &res); err != nil {
+		t.Fatalf("unmarshal json: %v\n%s", err, out.String())
+	}
+	if res.SessionID != "s1" {
+		t.Fatalf("session = %q, want s1", res.SessionID)
+	}
+	st, err := session.LoadModeState(sessionsDir, "s1")
+	if err != nil {
+		t.Fatalf("load mode: %v", err)
+	}
+	if st.Mode != session.ModePlan {
+		t.Fatalf("saved mode = %q, want plan kept", st.Mode)
+	}
+}
+
+func TestValidateResumeTargetWorktreeMismatch(t *testing.T) {
+	dataDir := t.TempDir()
+	sessionsDir := filepath.Join(dataDir, "sessions")
+	if err := os.MkdirAll(sessionsDir, 0o755); err != nil {
+		t.Fatalf("mkdir sessions: %v", err)
+	}
+	recorded := t.TempDir()
+	if err := os.WriteFile(filepath.Join(sessionsDir, "s1.jsonl"), []byte(`{"SessionID":"s1","Role":"user","Text":"hi"}`+"\n"), 0o600); err != nil {
+		t.Fatalf("write session: %v", err)
+	}
+	if err := session.SaveSessionMeta(sessionsDir, "s1", session.SessionMeta{WorktreePath: recorded}); err != nil {
+		t.Fatalf("save meta: %v", err)
+	}
+
+	start := app.StartOptions{
+		SessionID: "s1",
+		Worktree:  app.WorktreeSession{Path: t.TempDir()},
+	}
+	_, err := app.ValidateResumeTarget(app.Config{DataDir: dataDir}, start, t.TempDir())
+	if err == nil {
+		t.Fatal("expected explicit worktree mismatch to fail")
+	}
+	if !app.IsResumeRejectedError(err) {
+		t.Fatalf("expected ResumeRejectedError, got %T: %v", err, err)
+	}
+}
+
+func TestValidateResumeTargetRejectsExplicitWorktreeWithoutRecord(t *testing.T) {
+	dataDir := t.TempDir()
+	sessionsDir := filepath.Join(dataDir, "sessions")
+	if err := os.MkdirAll(sessionsDir, 0o755); err != nil {
+		t.Fatalf("mkdir sessions: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sessionsDir, "s1.jsonl"), []byte(`{"SessionID":"s1","Role":"user","Text":"hi"}`+"\n"), 0o600); err != nil {
+		t.Fatalf("write session: %v", err)
+	}
+
+	start := app.StartOptions{
+		SessionID: "s1",
+		Worktree:  app.WorktreeSession{Path: t.TempDir()},
+	}
+	if _, err := app.ValidateResumeTarget(app.Config{DataDir: dataDir}, start, t.TempDir()); err == nil {
+		t.Fatal("expected explicit worktree without session record to fail")
+	}
+}
+
+func TestValidateResumeTargetMissingWorktreeAllowsFallback(t *testing.T) {
+	dataDir := t.TempDir()
+	sessionsDir := filepath.Join(dataDir, "sessions")
+	if err := os.MkdirAll(sessionsDir, 0o755); err != nil {
+		t.Fatalf("mkdir sessions: %v", err)
+	}
+	missing := filepath.Join(t.TempDir(), "gone")
+	if err := os.WriteFile(filepath.Join(sessionsDir, "s1.jsonl"), []byte(`{"SessionID":"s1","Role":"user","Text":"hi"}`+"\n"), 0o600); err != nil {
+		t.Fatalf("write session: %v", err)
+	}
+	originalWorkspace := t.TempDir()
+	if err := session.SaveSessionMeta(sessionsDir, "s1", session.SessionMeta{
+		WorktreePath:      missing,
+		OriginalWorkspace: originalWorkspace,
+	}); err != nil {
+		t.Fatalf("save meta: %v", err)
+	}
+
+	// Resuming from the recorded original workspace is the fallback path:
+	// the session rebinds to this directory after cleanup.
+	target, err := app.ValidateResumeTarget(app.Config{DataDir: dataDir}, app.StartOptions{SessionID: "s1"}, originalWorkspace)
+	if err != nil {
+		t.Fatalf("missing worktree should allow fallback from the original workspace: %v", err)
+	}
+	if target.Session.Path != "" || target.MissingWorktree == false {
+		t.Fatalf("expected missing-worktree decision, got %+v", target)
+	}
+
+	withExplicit := app.StartOptions{
+		SessionID: "s1",
+		Worktree:  app.WorktreeSession{Path: t.TempDir()},
+	}
+	if _, err := app.ValidateResumeTarget(app.Config{DataDir: dataDir}, withExplicit, originalWorkspace); err == nil {
+		t.Fatal("expected explicit worktree takeover of missing worktree session to fail")
+	}
+}
+
+func TestValidateResumeTargetMissingWorktreeCrossWorkspaceRejectedReadOnly(t *testing.T) {
+	dataDir := t.TempDir()
+	sessionsDir := filepath.Join(dataDir, "sessions")
+	if err := os.MkdirAll(sessionsDir, 0o755); err != nil {
+		t.Fatalf("mkdir sessions: %v", err)
+	}
+	missing := filepath.Join(t.TempDir(), "gone")
+	if err := os.WriteFile(filepath.Join(sessionsDir, "s1.jsonl"), []byte(`{"SessionID":"s1","Role":"user","Text":"hi"}`+"\n"), 0o600); err != nil {
+		t.Fatalf("write session: %v", err)
+	}
+	meta := session.SessionMeta{
+		Workspace:          missing,
+		Branch:             "worktree-feature",
+		WorktreeName:       "feature",
+		WorktreePath:       missing,
+		WorktreeBranch:     "worktree-feature",
+		OriginalWorkspace:  "/somewhere/else",
+		OriginalBranch:     "main",
+		OriginalHeadCommit: "abc123",
+	}
+	if err := session.SaveSessionMeta(sessionsDir, "s1", meta); err != nil {
+		t.Fatalf("save meta: %v", err)
+	}
+	before, err := session.LoadSessionMeta(sessionsDir, "s1")
+	if err != nil {
+		t.Fatalf("load before meta: %v", err)
+	}
+
+	_, err = app.ValidateResumeTarget(app.Config{DataDir: dataDir}, app.StartOptions{SessionID: "s1"}, t.TempDir())
+	if err == nil {
+		t.Fatal("expected missing-worktree cross-workspace resume to be rejected")
+	}
+	if !app.IsCrossWorkspaceResumeError(err) {
+		t.Fatalf("expected CrossWorkspaceResumeError, got %T: %v", err, err)
+	}
+	after, err := session.LoadSessionMeta(sessionsDir, "s1")
+	if err != nil {
+		t.Fatalf("load meta: %v", err)
+	}
+	if after != before {
+		t.Fatalf("rejected resume must not mutate session metadata:\nbefore: %+v\nafter:  %+v", before, after)
+	}
+}
+
+func TestValidateResumeTargetRejectsCrossWorkspace(t *testing.T) {
+	dataDir := t.TempDir()
+	sessionsDir := filepath.Join(dataDir, "sessions")
+	if err := os.MkdirAll(sessionsDir, 0o755); err != nil {
+		t.Fatalf("mkdir sessions: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sessionsDir, "s1.jsonl"), []byte(`{"SessionID":"s1","Role":"user","Text":"hi"}`+"\n"), 0o600); err != nil {
+		t.Fatalf("write session: %v", err)
+	}
+	if err := session.SaveSessionMeta(sessionsDir, "s1", session.SessionMeta{Workspace: "/somewhere/else"}); err != nil {
+		t.Fatalf("save meta: %v", err)
+	}
+
+	_, err := app.ValidateResumeTarget(app.Config{DataDir: dataDir}, app.StartOptions{SessionID: "s1"}, t.TempDir())
+	if err == nil {
+		t.Fatal("expected cross-workspace resume to be rejected")
+	}
+	if !app.IsCrossWorkspaceResumeError(err) {
+		t.Fatalf("expected CrossWorkspaceResumeError, got %T: %v", err, err)
+	}
+}
+
+func TestValidateResumeTargetRejectsSubagent(t *testing.T) {
+	dataDir := t.TempDir()
+	sessionsDir := filepath.Join(dataDir, "sessions")
+	if err := os.MkdirAll(sessionsDir, 0o755); err != nil {
+		t.Fatalf("mkdir sessions: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sessionsDir, "subagent-x.jsonl"), []byte(`{"SessionID":"subagent-x","Role":"user","Text":"hi"}`+"\n"), 0o600); err != nil {
+		t.Fatalf("write session: %v", err)
+	}
+
+	_, err := app.ValidateResumeTarget(app.Config{DataDir: dataDir}, app.StartOptions{SessionID: "subagent-x"}, t.TempDir())
+	if err == nil {
+		t.Fatal("expected subagent session to be rejected")
+	}
+	if !app.IsResumeRejectedError(err) {
+		t.Fatalf("expected ResumeRejectedError, got %T: %v", err, err)
 	}
 }
 
@@ -771,7 +1738,7 @@ func TestRunExecAttachSendsOpenAICompatibleFilePart(t *testing.T) {
 
 	var out bytes.Buffer
 	var errOut bytes.Buffer
-	opts := &cliOptions{cfg: app.DefaultConfig()}
+	opts := &cliOptions{cfg: localExecConfig()}
 	opts.cfg.DataDir = dir
 	opts.cfg.DeepSeekMultimodal = app.MultimodalProviderConfig{
 		Enabled: true,
@@ -779,7 +1746,7 @@ func TestRunExecAttachSendsOpenAICompatibleFilePart(t *testing.T) {
 		BaseURL: srv.URL,
 		Model:   "gpt-4o",
 	}
-	if err := runExec(&out, &errOut, strings.NewReader(""), opts, []string{"inspect"}, false, 0, []string{attachment}); err != nil {
+	if err := runExec(&out, &errOut, strings.NewReader(""), opts, []string{"inspect"}, false, 0, []string{attachment}, "", ""); err != nil {
 		t.Fatalf("runExec: %v", err)
 	}
 	var payload map[string]any
@@ -858,7 +1825,7 @@ func TestRootExecAppliesThinkingAndEffortOverridesWithoutChangingTextOutput(t *t
 	}
 	defer func() { _ = os.Chdir(oldwd) }()
 
-	opts := &cliOptions{cfg: app.DefaultConfig()}
+	opts := &cliOptions{cfg: localExecConfig()}
 	opts.cfg.DataDir = dir
 	root := newRootCmd(opts)
 	var out bytes.Buffer
@@ -888,7 +1855,7 @@ func TestRootExecAppliesThinkingAndEffortOverridesWithoutChangingTextOutput(t *t
 }
 
 func TestPrepareCLIConfigMarksExplicitDefaultModel(t *testing.T) {
-	opts := &cliOptions{cfg: app.DefaultConfig()}
+	opts := &cliOptions{cfg: localExecConfig()}
 	cmd := &cobra.Command{Use: "test"}
 	cmd.Flags().String("model", opts.cfg.Model, "")
 	if err := cmd.Flags().Set("model", "deepseek-v4-flash"); err != nil {
@@ -903,7 +1870,7 @@ func TestPrepareCLIConfigMarksExplicitDefaultModel(t *testing.T) {
 }
 
 func TestRootHelpOnlyShowsPublicRootFlags(t *testing.T) {
-	opts := &cliOptions{cfg: app.DefaultConfig()}
+	opts := &cliOptions{cfg: localExecConfig()}
 	root := newRootCmd(opts)
 	var out bytes.Buffer
 	root.SetOut(&out)
@@ -955,7 +1922,7 @@ func TestExecRejectsUnsupportedEffortBeforeRun(t *testing.T) {
 	}
 	defer func() { _ = os.Chdir(oldwd) }()
 
-	opts := &cliOptions{cfg: app.DefaultConfig()}
+	opts := &cliOptions{cfg: localExecConfig()}
 	root := newRootCmd(opts)
 	var out bytes.Buffer
 	root.SetOut(&out)
@@ -977,7 +1944,7 @@ func TestExecRejectsUnsupportedEffortBeforeRun(t *testing.T) {
 }
 
 func TestThinkingAndEffortFlagsArePersistent(t *testing.T) {
-	opts := &cliOptions{cfg: app.DefaultConfig()}
+	opts := &cliOptions{cfg: localExecConfig()}
 	root := newRootCmd(opts)
 
 	if root.PersistentFlags().Lookup("thinking") == nil {
@@ -1006,7 +1973,7 @@ func TestThinkingAndEffortFlagsArePersistent(t *testing.T) {
 }
 
 func TestWorktreeFlagIsOptionalValuePersistentFlag(t *testing.T) {
-	opts := &cliOptions{cfg: app.DefaultConfig()}
+	opts := &cliOptions{cfg: localExecConfig()}
 	root := newRootCmd(opts)
 	flag := root.PersistentFlags().Lookup("worktree")
 	if flag == nil {
@@ -1128,7 +2095,7 @@ func TestRootExecuteSupportsSeparatedWorktreeName(t *testing.T) {
 	}
 	defer func() { _ = os.Chdir(oldwd) }()
 
-	opts := &cliOptions{cfg: app.DefaultConfig()}
+	opts := &cliOptions{cfg: localExecConfig()}
 	opts.cfg.DataDir = t.TempDir()
 	root := newRootCmd(opts)
 	root.SetArgs(normalizeWorktreeArgs([]string{"exec", "--worktree", "feature-x", "--effort=low", "hi"}, true))
@@ -1152,7 +2119,7 @@ func TestRootExecBareWorktreePreservesPrompt(t *testing.T) {
 	}
 	defer func() { _ = os.Chdir(oldwd) }()
 
-	opts := &cliOptions{cfg: app.DefaultConfig()}
+	opts := &cliOptions{cfg: localExecConfig()}
 	opts.cfg.DataDir = t.TempDir()
 	root := newRootCmd(opts)
 	root.SetArgs(normalizeWorktreeArgs([]string{"exec", "--worktree", "--effort=low", "fix bug"}, true))
@@ -1178,7 +2145,7 @@ func TestPrepareResumeWorktreeChdirsBeforeConfigLoad(t *testing.T) {
 	}
 	defer func() { _ = os.Chdir(oldwd) }()
 
-	opts := &cliOptions{cfg: app.DefaultConfig()}
+	opts := &cliOptions{cfg: localExecConfig()}
 	opts.cfg.DataDir = dataDir
 	root := newRootCmd(opts)
 	if err := root.PersistentFlags().Set("worktree", "resume-test"); err != nil {
@@ -1204,7 +2171,7 @@ func TestPrepareResumeWorktreeChdirsBeforeConfigLoad(t *testing.T) {
 	if err := os.Chdir(repo); err != nil {
 		t.Fatalf("Chdir repo: %v", err)
 	}
-	opts = &cliOptions{cfg: app.DefaultConfig()}
+	opts = &cliOptions{cfg: localExecConfig()}
 	opts.cfg.DataDir = dataDir
 	if err := prepareResumeWorktree([]string{"resume-session"}, false, opts); err != nil {
 		t.Fatalf("prepareResumeWorktree: %v", err)
@@ -1238,7 +2205,7 @@ func TestPrepareResumeWorktreeUsesRecordedSubdirectoryWorkspace(t *testing.T) {
 	}
 	defer func() { _ = os.Chdir(oldwd) }()
 
-	opts := &cliOptions{cfg: app.DefaultConfig()}
+	opts := &cliOptions{cfg: localExecConfig()}
 	opts.cfg.DataDir = dataDir
 	root := newRootCmd(opts)
 	if err := root.PersistentFlags().Set("worktree", "resume-subdir"); err != nil {
@@ -1262,7 +2229,7 @@ func TestPrepareResumeWorktreeUsesRecordedSubdirectoryWorkspace(t *testing.T) {
 	if err := os.Chdir(repo); err != nil {
 		t.Fatalf("Chdir repo: %v", err)
 	}
-	opts = &cliOptions{cfg: app.DefaultConfig()}
+	opts = &cliOptions{cfg: localExecConfig()}
 	opts.cfg.DataDir = dataDir
 	if err := prepareResumeWorktree([]string{"resume-subdir-session"}, false, opts); err != nil {
 		t.Fatalf("prepareResumeWorktree: %v", err)
@@ -1294,7 +2261,7 @@ func TestPrepareResumeWorktreeMissingPathFallsBack(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("save session meta: %v", err)
 	}
-	opts := &cliOptions{cfg: app.DefaultConfig()}
+	opts := &cliOptions{cfg: localExecConfig()}
 	opts.cfg.DataDir = dataDir
 	if err := prepareResumeWorktree([]string{"resume-session"}, false, opts); err != nil {
 		t.Fatalf("prepareResumeWorktree: %v", err)

@@ -581,7 +581,7 @@ func TestEscWithQueuedPromptSubmitsItAfterInterrupt(t *testing.T) {
 	if !strings.Contains(renderedAfterEsc, "Interrupted to submit queued follow-up") {
 		t.Fatalf("queued Esc interrupt should show queued follow-up notice:\n%s", renderedAfterEsc)
 	}
-	if len(*intents) != 1 || (*intents)[0].Kind != protocol.IntentShutdown {
+	if len(*intents) != 1 || (*intents)[0].Kind != protocol.IntentShutdown || (*intents)[0].InterruptSource != "esc" {
 		t.Fatalf("expected shutdown intent from Esc, got %+v", *intents)
 	}
 
@@ -612,7 +612,7 @@ func TestEscWithDraftQueuesAndSubmitsItAfterInterrupt(t *testing.T) {
 	if !m.submitQueuedPromptAfterInterrupt {
 		t.Fatal("expected Esc with draft to queue and request immediate submit")
 	}
-	if len(*intents) != 1 || (*intents)[0].Kind != protocol.IntentShutdown {
+	if len(*intents) != 1 || (*intents)[0].Kind != protocol.IntentShutdown || (*intents)[0].InterruptSource != "esc" {
 		t.Fatalf("expected shutdown intent from Esc, got %+v", *intents)
 	}
 
@@ -675,7 +675,7 @@ func TestCtrlCWhileBusyInterruptsWithoutArmingQuit(t *testing.T) {
 	if !m.quitArmedUntil.IsZero() {
 		t.Fatal("expected ctrl+c while busy not to arm quit")
 	}
-	if len(*intents) != 1 || (*intents)[0].Kind != protocol.IntentShutdown {
+	if len(*intents) != 1 || (*intents)[0].Kind != protocol.IntentShutdown || (*intents)[0].InterruptSource != "ctrl+c" {
 		t.Fatalf("expected ctrl+c while busy to dispatch shutdown intent, got %+v", *intents)
 	}
 
@@ -1276,7 +1276,7 @@ func TestChatBusyViewShowsWorkingAboveComposer(t *testing.T) {
 
 func TestBusyQueueAndFooterStayOutsideComposerBlock(t *testing.T) {
 	m := newModel(nil, "deepseek-v4-flash", "high", "on")
-	m.width = 100
+	m.width = 110
 	m.height = 24
 	m.cwd = "~/Engineer/ai/dsk/whale"
 	m.gitBranch = "feat/composer-redesign"
@@ -1285,11 +1285,11 @@ func TestBusyQueueAndFooterStayOutsideComposerBlock(t *testing.T) {
 	m.input.SetValue("editable follow-up")
 	m.queuedPrompts = []queuedPrompt{{Text: "first queued prompt"}, {Text: "second queued prompt"}}
 
-	bottom := ansi.Strip(m.renderBottom(100))
+	bottom := ansi.Strip(m.renderBottom(110))
 	lines := strings.Split(strings.TrimRight(bottom, "\n"), "\n")
 	busyIdx := firstLineContaining(lines, "Working (12s)")
 	queueIdx := firstLineContaining(lines, "queued follow-up (2)")
-	boundaryIdx := firstFullWidthBoundaryLine(lines, 100)
+	boundaryIdx := firstFullWidthBoundaryLine(lines, 110)
 	composerIdx := firstLineContaining(lines, "editable follow-up")
 	footerIdx := len(lines) - 1
 

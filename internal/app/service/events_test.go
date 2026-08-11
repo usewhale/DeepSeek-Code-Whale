@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -1296,6 +1297,32 @@ func TestShutdownCancelsPendingInteractions(t *testing.T) {
 	}
 }
 
+func TestShutdownPreservesInterruptSource(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	turnCtx, turnCancel := context.WithCancelCause(ctx)
+	svc := &Service{
+		ctx:         ctx,
+		events:      make(chan Event, 1),
+		cancelCause: turnCancel,
+	}
+
+	svc.Dispatch(Intent{Kind: IntentShutdown, InterruptSource: "esc"})
+
+	select {
+	case <-turnCtx.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("shutdown did not cancel active turn")
+	}
+	cause := context.Cause(turnCtx)
+	if !errors.Is(cause, agent.ErrUserInterrupt) {
+		t.Fatalf("cause = %v, want user interrupt", cause)
+	}
+	if got := agent.UserInterruptSource(cause); got != "esc" {
+		t.Fatalf("source = %q, want esc", got)
+	}
+}
+
 func TestShutdownRejectsLateInteractions(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -1797,6 +1824,63 @@ func TestEnableAutoAcceptIntentDoesNotEndActiveTurn(t *testing.T) {
 		t.Fatalf("enable auto accept should not emit another event, got %+v", ev)
 	case <-time.After(100 * time.Millisecond):
 	}
+}
+
+func TestQuietPermissionIntentsDoNotEndActiveTurn(t *testing.T) {
+	work := t.TempDir()
+	t.Chdir(work)
+	cfg := app.DefaultConfig()
+	cfg.DataDir = t.TempDir()
+	svc, err := New(t.Context(), cfg, app.StartOptions{NewSession: true})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer svc.Close()
+	waitForServiceEvent(t, svc, EventSessionHydrated)
+
+	// Quiet auto-accept: EventInfo only, no EventTurnDone.
+	svc.Dispatch(Intent{Kind: IntentSetApprovalMode, ApprovalMode: "auto_accept", Quiet: true})
+	info := waitForServiceEvent(t, svc, EventInfo)
+	if info.Text != "Auto-accept edits enabled" || !info.AutoAccept || !info.AutoAcceptKnown {
+		t.Fatalf("unexpected quiet approval mode info: %+v", info)
+	}
+	select {
+	case ev := <-svc.Events():
+		t.Fatalf("quiet approval mode intent should not emit another event, got %+v", ev)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// Quiet auto-review: EventInfo only, no EventTurnDone.
+	svc.Dispatch(Intent{Kind: IntentSetAutoReview, AutoReview: true, Quiet: true})
+	info = waitForServiceEvent(t, svc, EventInfo)
+	if info.Text != "Auto-review enabled" || !info.AutoReview || !info.AutoAcceptKnown {
+		t.Fatalf("unexpected quiet auto review info: %+v", info)
+	}
+	select {
+	case ev := <-svc.Events():
+		t.Fatalf("quiet auto review intent should not emit another event, got %+v", ev)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// Quiet ask: EventInfo only, no EventTurnDone.
+	svc.Dispatch(Intent{Kind: IntentSetApprovalMode, ApprovalMode: "ask", Quiet: true})
+	info = waitForServiceEvent(t, svc, EventInfo)
+	if info.Text != "Ask for approval" || info.AutoAccept || !info.AutoAcceptKnown {
+		t.Fatalf("unexpected quiet ask info: %+v", info)
+	}
+	select {
+	case ev := <-svc.Events():
+		t.Fatalf("quiet ask intent should not emit another event, got %+v", ev)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// Non-quiet intents still end the turn, so the idle Alt+P path is unchanged.
+	svc.Dispatch(Intent{Kind: IntentSetApprovalMode, ApprovalMode: "auto_accept"})
+	info = waitForServiceEvent(t, svc, EventInfo)
+	if info.Text != "Auto-accept edits enabled" {
+		t.Fatalf("unexpected non-quiet approval mode info: %q", info.Text)
+	}
+	waitForServiceEvent(t, svc, EventTurnDone)
 }
 
 func TestReviewCommandOpensMenu(t *testing.T) {

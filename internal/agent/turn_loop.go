@@ -126,6 +126,7 @@ func (a *Agent) runStreamWithNewMessages(ctx context.Context, sessionID string, 
 		wrapUpNudged := false
 		planLoopNudges := 0
 		leakedToolCallNudges := 0
+		prematureEndTurnNudges := 0
 		consecutiveStormRounds := 0
 		consecutiveRedundantRounds := 0
 		progress := &progressTracker{}
@@ -214,7 +215,9 @@ func (a *Agent) runStreamWithNewMessages(ctx context.Context, sessionID string, 
 			assistant, toolMsg, usage, modelName, cacheShape, abortTurn, attemptedToolCalls, sErr := a.streamAndHandle(ctx, sessionID, history, rt, out, turnPolicy, toolSnapshot, remainingToolCalls, autoDenyCounts, opts)
 			if sErr != nil {
 				if errors.Is(sErr, context.Canceled) {
-					a.persistInterruptedTurnMarker(sessionID)
+					if !isServiceShutdown(ctx) {
+						a.persistInterruptedTurnMarker(ctx, sessionID)
+					}
 					emit(AgentEvent{Type: AgentEventTypeTurnCancelled, Content: "turn cancelled"})
 					return
 				}
@@ -245,7 +248,9 @@ func (a *Agent) runStreamWithNewMessages(ctx context.Context, sessionID string, 
 				}
 				if ctx.Err() != nil {
 					if errors.Is(ctx.Err(), context.Canceled) {
-						a.persistInterruptedTurnMarker(sessionID)
+						if !isServiceShutdown(ctx) {
+							a.persistInterruptedTurnMarker(ctx, sessionID)
+						}
 						return
 					}
 					// Deadline expiry is a timeout, not a user interrupt:
@@ -438,6 +443,34 @@ func (a *Agent) runStreamWithNewMessages(ctx context.Context, sessionID string, 
 				}
 				continue
 			}
+			// Premature-end recovery. DeepSeek can emit an ordinary end_turn
+			// immediately after saying it will perform the next action, leaving no
+			// structured tool call for Whale to execute. Recover only the narrow,
+			// dangling action-lead-in shape and only in Agent mode. The hidden nudge
+			// is persisted for diagnostics and the retry count is bounded so a
+			// provider that keeps stopping cannot spin forever.
+			canRetryPrematureEnd := a.maxTurns <= 0 || modelTurns < a.maxTurns
+			if canRetryPrematureEnd && prematureEndTurnNudges < maxPrematureEndTurnNudges &&
+				shouldRecoverPrematureEndTurn(assistant, a.mode, opts, len(toolSnapshot.Tools()) > 0) {
+				prematureEndTurnNudges++
+				nudge, err := a.persistPrematureEndTurnNudge(ctx, sessionID)
+				if err != nil {
+					emit(AgentEvent{Type: AgentEventTypeError, Err: err})
+					return
+				}
+				rt.Log.Append(assistant)
+				rt.Log.Append(nudge)
+				history = append(history, assistant, nudge)
+				if !emit(AgentEvent{Type: AgentEventTypePrematureEndRecovered}) {
+					return
+				}
+				// The announced action was already streamed. Drop it from live output
+				// so the recovered iteration supplies the response the user sees.
+				if !emit(AgentEvent{Type: AgentEventTypeResponseReset}) {
+					return
+				}
+				continue
+			}
 			// Plan-as-reply finalization: in Plan mode the assistant's final
 			// answer IS the plan. A turn that ends with text (rather than a tool
 			// call such as request_user_input) is an approvable plan, so emit
@@ -452,4 +485,8 @@ func (a *Agent) runStreamWithNewMessages(ctx context.Context, sessionID string, 
 	}()
 
 	return out, nil
+}
+
+func isServiceShutdown(ctx context.Context) bool {
+	return errors.Is(context.Cause(ctx), ErrServiceShutdown)
 }

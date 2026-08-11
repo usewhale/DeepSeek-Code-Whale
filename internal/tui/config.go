@@ -90,12 +90,12 @@ func (m *model) handleConfigManagerKey(msg tea.KeyMsg) tea.Cmd {
 			m.closeConfigManager(false)
 		}
 	case "up", "k":
-		if m.configManager.selected > 0 {
-			m.configManager.selected--
+		if len(m.configManager.matches) > 0 {
+			m.configManager.selected = wrapSelection(m.configManager.selected, len(m.configManager.matches), -1)
 		}
 	case "down", "j":
-		if m.configManager.selected < len(m.configManager.matches)-1 {
-			m.configManager.selected++
+		if len(m.configManager.matches) > 0 {
+			m.configManager.selected = wrapSelection(m.configManager.selected, len(m.configManager.matches), 1)
 		}
 	case " ", "space":
 		m.toggleSelectedConfigSetting()

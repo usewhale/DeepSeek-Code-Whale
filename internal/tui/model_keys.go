@@ -25,7 +25,7 @@ func (m *model) handleKeyMsg(msg tea.KeyMsg) (tea.Cmd, bool, bool) {
 	}
 	if m.mode == modeChat && m.page == pageDiff {
 		if msg.String() == "ctrl+c" && m.busy {
-			return m.interruptBusyTurn(), false, true
+			return m.interruptBusyTurn("ctrl+c"), false, true
 		}
 		if msg.String() == "ctrl+c" {
 			return m.handleGlobalKey(msg)
@@ -67,7 +67,7 @@ func (m *model) handleKeyMsg(msg tea.KeyMsg) (tea.Cmd, bool, bool) {
 	// textarea, so a Ctrl+C arriving inside that window would otherwise
 	// see an empty textarea and incorrectly interrupt the running turn.
 	if msg.String() == "ctrl+c" && m.busy && (m.mode != modeChat || (m.input.Value() == "" && !m.hasWindowsPasteBuffer())) {
-		return m.interruptBusyTurn(), false, true
+		return m.interruptBusyTurn("ctrl+c"), false, true
 	}
 	if m.mode == modeChat {
 		if cmd, handled := m.handleWindowsPasteFallbackKey(msg); handled {
@@ -141,7 +141,7 @@ func (m model) shouldRouteWindowsPasteFallbackBeforeLayout(msg tea.KeyMsg) bool 
 		len(msg.Runes) > 0
 }
 
-func (m *model) interruptBusyTurn() tea.Cmd {
+func (m *model) interruptBusyTurn(source string) tea.Cmd {
 	alreadyStopping := m.stopping
 	m.cancelBlockingModalForInterrupt(!alreadyStopping)
 	if alreadyStopping {
@@ -173,7 +173,7 @@ func (m *model) interruptBusyTurn() tea.Cmd {
 	m.stoppingInterruptCount = 0
 	m.quitArmedUntil = time.Time{}
 	if m.runtime != nil {
-		m.dispatchIntent(protocol.Intent{Kind: protocol.IntentShutdown})
+		m.dispatchIntent(protocol.Intent{Kind: protocol.IntentShutdown, InterruptSource: source})
 	}
 	m.status = "stopping"
 	m.stopping = true

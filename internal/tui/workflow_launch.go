@@ -33,12 +33,12 @@ func (m *model) handleWorkflowLaunchKey(msg tea.KeyMsg) tea.Cmd {
 		m.mode = modeChat
 		m.status = "ready"
 	case "up", "k":
-		if len(actions) > 0 && m.workflowLaunch.selected > 0 {
-			m.workflowLaunch.selected--
+		if len(actions) > 0 {
+			m.workflowLaunch.selected = wrapSelection(m.workflowLaunch.selected, len(actions), -1)
 		}
 	case "down", "j":
-		if len(actions) > 0 && m.workflowLaunch.selected < len(actions)-1 {
-			m.workflowLaunch.selected++
+		if len(actions) > 0 {
+			m.workflowLaunch.selected = wrapSelection(m.workflowLaunch.selected, len(actions), 1)
 		}
 	case "enter":
 		if len(actions) == 0 {

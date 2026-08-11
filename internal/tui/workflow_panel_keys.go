@@ -21,21 +21,21 @@ func (m *model) handleWorkflowPanelKey(msg tea.KeyMsg) tea.Cmd {
 	case "up", "k":
 		if workflowPanelHasSnapshot(m.workflowPanel.result) {
 			m.moveWorkflowPanelSnapshotSelection(-1)
-		} else if m.workflowPanel.selected > 0 {
-			m.workflowPanel.selected--
+		} else if runs := workflowPanelRunSections(m.workflowPanel.result); len(runs) > 0 {
+			m.workflowPanel.selected = wrapSelection(m.workflowPanel.selected, len(runs), -1)
 		}
 	case "down", "j":
 		if workflowPanelHasSnapshot(m.workflowPanel.result) {
 			m.moveWorkflowPanelSnapshotSelection(1)
-		} else if runs := workflowPanelRunSections(m.workflowPanel.result); m.workflowPanel.selected < len(runs)-1 {
-			m.workflowPanel.selected++
+		} else if runs := workflowPanelRunSections(m.workflowPanel.result); len(runs) > 0 {
+			m.workflowPanel.selected = wrapSelection(m.workflowPanel.selected, len(runs), 1)
 		}
 	case "tab", "right", "l":
 		if workflowPanelHasSnapshot(m.workflowPanel.result) {
 			m.workflowPanel.focus = workflowPanelFocusTask
 			m.clampWorkflowPanelSnapshotSelection()
-		} else if runs := workflowPanelRunSections(m.workflowPanel.result); msg.String() == "tab" && m.workflowPanel.selected < len(runs)-1 {
-			m.workflowPanel.selected++
+		} else if runs := workflowPanelRunSections(m.workflowPanel.result); msg.String() == "tab" && len(runs) > 0 {
+			m.workflowPanel.selected = wrapSelection(m.workflowPanel.selected, len(runs), 1)
 		}
 	case "enter":
 		if workflowPanelHasSnapshot(m.workflowPanel.result) {
@@ -148,13 +148,8 @@ func (m *model) handleWorkflowPanelDetailKey(msg tea.KeyMsg) tea.Cmd {
 }
 
 func (m *model) moveWorkflowPanelDetailSection(delta int) {
-	next := int(m.workflowPanel.detailSection) + delta
-	if next < int(workflowPanelDetailPrompt) {
-		next = int(workflowPanelDetailPrompt)
-	}
-	if next > int(workflowPanelDetailOutcome) {
-		next = int(workflowPanelDetailOutcome)
-	}
+	count := int(workflowPanelDetailOutcome) - int(workflowPanelDetailPrompt) + 1
+	next := wrapSelection(int(m.workflowPanel.detailSection), count, delta)
 	if workflowPanelDetailSection(next) != m.workflowPanel.detailSection {
 		m.workflowPanel.detailSection = workflowPanelDetailSection(next)
 		m.workflowPanel.detailExpanded = false
@@ -192,13 +187,20 @@ func (m *model) clampWorkflowPanelSelection() {
 }
 
 func (m *model) moveWorkflowPanelSnapshotSelection(delta int) {
+	snapshot := workflowPanelSnapshot(m.workflowPanel.result)
+	if snapshot == nil || len(snapshot.Phases) == 0 {
+		m.workflowPanel.selectedPhase = 0
+		m.workflowPanel.selectedTask = 0
+		m.workflowPanel.focus = workflowPanelFocusPhase
+		return
+	}
 	if m.workflowPanel.focus == workflowPanelFocusTask {
-		m.workflowPanel.selectedTask += delta
+		tasks := snapshot.Phases[m.workflowPanel.selectedPhase].Tasks
+		m.workflowPanel.selectedTask = wrapSelection(m.workflowPanel.selectedTask, len(tasks), delta)
 	} else {
-		m.workflowPanel.selectedPhase += delta
+		m.workflowPanel.selectedPhase = wrapSelection(m.workflowPanel.selectedPhase, len(snapshot.Phases), delta)
 		m.workflowPanel.selectedTask = 0
 	}
-	m.clampWorkflowPanelSnapshotSelection()
 }
 
 func (m *model) clampWorkflowPanelSnapshotSelection() {

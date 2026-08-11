@@ -41,6 +41,7 @@ const (
 
 type Intent struct {
 	Kind               IntentKind            `json:"kind"`
+	InterruptSource    string                `json:"interrupt_source,omitempty"`
 	Input              string                `json:"input,omitempty"`
 	ClientInputID      string                `json:"client_input_id,omitempty"`
 	HiddenInput        bool                  `json:"hidden_input,omitempty"`
@@ -73,6 +74,11 @@ type Intent struct {
 	WorkflowScript     string                `json:"workflow_script,omitempty"`
 	WorkflowSaveAs     string                `json:"workflow_save_as,omitempty"`
 	WorkflowScriptPath string                `json:"workflow_script_path,omitempty"`
+	// Quiet suppresses the EventTurnDone the service emits after handling an
+	// intent. The TUI sets it for intents dispatched mid-turn (e.g. the
+	// Alt+P permission cycle while the agent is busy) so the running turn is
+	// not ended by a spurious turn-done event.
+	Quiet bool `json:"quiet,omitempty"`
 }
 
 type ConfigSettingUpdate struct {

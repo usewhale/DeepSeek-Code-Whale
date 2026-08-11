@@ -58,6 +58,7 @@ func (c *Client) streamMultimodal(ctx context.Context, history []core.Message, t
 		"stream_options": map[string]any{"include_usage": true},
 		"messages":       msgs,
 	}
+	c.applyChatCompletionsThinking(payload, false)
 	if len(tools) > 0 {
 		payload["tools"] = toDeepSeekTools(tools)
 	}

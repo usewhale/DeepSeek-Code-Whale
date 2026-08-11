@@ -9,6 +9,10 @@ import (
 	"sync"
 	"testing"
 	"unicode/utf8"
+
+	"github.com/usewhale/whale/internal/llm/deepseek"
+	"github.com/usewhale/whale/internal/session"
+	"github.com/usewhale/whale/internal/store"
 )
 
 // TestRunExecScrubsLeakedToolCallFromOutput verifies that when the model writes
@@ -17,7 +21,20 @@ import (
 // is dropped from the final output once the recovery turn re-streams the real
 // answer. Guards the downstream half of the leaked-tool-call fix (the agent
 // emits a response reset; exec must honor it).
+// localExecConfig returns a default config pinned to the local web_search
+// mode: these exec tests mock the chat-completions endpoint, and the default
+// (auto) mode would route deepseek-v4-flash through the Responses API.
+func localExecConfig() Config {
+	cfg := DefaultConfig()
+	cfg.DeepSeekWebSearch = deepseek.WebSearchModeLocal
+	return cfg
+}
+
 func TestRunExecScrubsLeakedToolCallFromOutput(t *testing.T) {
+	// Isolate from the user's global config (~/.whale): RunExec reloads real
+	// config files, and a web_search = "server" in the user's config would
+	// route this mock (chat-completions only) through the Responses API.
+	t.Setenv("WHALE_HOME", t.TempDir())
 	t.Setenv("DEEPSEEK_API_KEY", "sk-1234567890abcdef1234")
 	var mu sync.Mutex
 	reqs := 0
@@ -39,7 +56,7 @@ func TestRunExecScrubsLeakedToolCallFromOutput(t *testing.T) {
 	defer srv.Close()
 	t.Setenv("DEEPSEEK_BASE_URL", srv.URL)
 
-	res, err := RunExec(context.Background(), DefaultConfig(), StartOptions{NewSession: true}, "read a.go")
+	res, err := RunExec(context.Background(), localExecConfig(), StartOptions{NewSession: true}, "read a.go")
 	if err != nil {
 		t.Fatalf("RunExec: %v", err)
 	}
@@ -55,6 +72,8 @@ func TestRunExecScrubsLeakedToolCallFromOutput(t *testing.T) {
 }
 
 func TestRunExecReturnsFinalOutput(t *testing.T) {
+	// Isolate from the user's global config, same as the scrub test above.
+	t.Setenv("WHALE_HOME", t.TempDir())
 	t.Setenv("DEEPSEEK_API_KEY", "sk-1234567890abcdef1234")
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -65,7 +84,7 @@ func TestRunExecReturnsFinalOutput(t *testing.T) {
 	defer srv.Close()
 	t.Setenv("DEEPSEEK_BASE_URL", srv.URL)
 
-	res, err := RunExec(context.Background(), DefaultConfig(), StartOptions{NewSession: true}, "hi")
+	res, err := RunExec(context.Background(), localExecConfig(), StartOptions{NewSession: true}, "hi")
 	if err != nil {
 		t.Fatalf("RunExec: %v", err)
 	}
@@ -81,6 +100,62 @@ func TestRunExecReturnsFinalOutput(t *testing.T) {
 	if res.Model == "" {
 		t.Fatal("expected model")
 	}
+}
+
+func TestRunExecNewSessionIDsDiffer(t *testing.T) {
+	t.Setenv("DEEPSEEK_API_KEY", "sk-1234567890abcdef1234")
+	srv := newExecEchoServer(t, "ok")
+	defer srv.Close()
+	t.Setenv("DEEPSEEK_BASE_URL", srv.URL)
+
+	cfg := localExecConfig()
+	cfg.DataDir = t.TempDir()
+
+	first, err := RunExec(context.Background(), cfg, StartOptions{NewSession: true}, "hi")
+	if err != nil {
+		t.Fatalf("first RunExec: %v", err)
+	}
+	second, err := RunExec(context.Background(), cfg, StartOptions{NewSession: true}, "hi")
+	if err != nil {
+		t.Fatalf("second RunExec: %v", err)
+	}
+	if first.SessionID == "" || second.SessionID == "" {
+		t.Fatalf("expected non-empty session ids, got %q and %q", first.SessionID, second.SessionID)
+	}
+	if first.SessionID == second.SessionID {
+		t.Fatalf("expected a new session id per exec call, got %q twice", first.SessionID)
+	}
+}
+
+func TestRunExecNewSessionDefaultsToAgentMode(t *testing.T) {
+	t.Setenv("DEEPSEEK_API_KEY", "sk-1234567890abcdef1234")
+	srv := newExecEchoServer(t, "ok")
+	defer srv.Close()
+	t.Setenv("DEEPSEEK_BASE_URL", srv.URL)
+
+	cfg := localExecConfig()
+	cfg.DataDir = t.TempDir()
+
+	res, err := RunExec(context.Background(), cfg, StartOptions{NewSession: true}, "hi")
+	if err != nil {
+		t.Fatalf("RunExec: %v", err)
+	}
+	st, err := session.LoadModeState(store.DefaultSessionsDir(cfg.DataDir), res.SessionID)
+	if err != nil {
+		t.Fatalf("load mode state: %v", err)
+	}
+	if st.Mode != session.ModeAgent {
+		t.Fatalf("expected new session mode to default to agent, got %q", st.Mode)
+	}
+}
+
+func newExecEchoServer(t *testing.T, content string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprintf(w, "data: {\"choices\":[{\"delta\":{\"content\":%q},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}\n\n", content)
+		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
 }
 
 func TestSummarizeExecTextPreservesUTF8(t *testing.T) {

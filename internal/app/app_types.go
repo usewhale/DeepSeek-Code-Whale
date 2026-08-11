@@ -7,6 +7,7 @@ import (
 
 	"github.com/usewhale/whale/internal/agent"
 	"github.com/usewhale/whale/internal/core"
+	"github.com/usewhale/whale/internal/llm/deepseek"
 	"github.com/usewhale/whale/internal/lsp"
 	whalemcp "github.com/usewhale/whale/internal/mcp"
 	"github.com/usewhale/whale/internal/plugins"
@@ -50,6 +51,8 @@ type Config struct {
 	DeepSeekPrefixCompletion       bool
 	DeepSeekMultimodal             MultimodalProviderConfig
 	MiniMax                        MiniMaxProviderConfig
+	DeepSeekWebSearch              deepseek.WebSearchMode
+	DeepSeekAPI                    deepseek.API
 	ShellForegroundWaitDefaultMS   int
 	ShellForegroundWaitMaxMS       int
 	MaxParallelSubagents           int
@@ -176,6 +179,11 @@ type App struct {
 	// the entire refreshMCPTools body so concurrent refreshes serialize and
 	// the last one always observes the latest pluginTools.
 	toolMu sync.Mutex
+	// sessionMu guards sessionID against the MCP startup goroutine, which reads
+	// it during RestorePromotedTools while the dispatch goroutine switches
+	// sessions (resume / session-new / fork). sessionsDir is immutable after
+	// construction and does not need the lock.
+	sessionMu sync.Mutex
 
 	a          *agent.Agent
 	apiKey     string

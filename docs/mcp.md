@@ -54,6 +54,26 @@ Put servers under `mcpServers`:
 
 Whale also accepts `servers`, but `mcpServers` is the recommended format because it matches common MCP examples.
 
+## ACP（whale-acp）
+
+ACP 代理（`whale-acp`）读取同一个 `~/.whale/mcp.json` 基线，并与 ACP 客户端在
+`session/new`、`session/load` 中发送的 `mcpServers` 合并（名称冲突时客户端优先）。
+
+- 客户端下发的服务必须为 stdio：whale-acp 声明 `mcpCapabilities {http: false, sse: false}`，
+  并拒绝 http/sse 服务。
+- 本地基线原样透传，因此 `~/.whale/mcp.json` 中的 http 服务仍会连接（与主程序一致），
+  即使面向客户端的声明仅为 stdio。
+- MCP 工具为懒加载：schema 起始只有 `tool_search`，由模型按需选中激活。
+  以空查询调用 `tool_search` 可列出可用工具（返回 `<available-deferred-tools>` 块）。
+  ACP 会话没有 `/mcp` 命令，可查看代理 stderr 日志确认服务状态。
+- `session/new` 会等待服务连接完成（单服务超时，默认 15s），慢服务会延迟会话创建。
+
+**安全：** ACP 宿主完全可信——它控制 `cwd`、可提供 `mcpServers`（任意 stdio 进程），
+并驱动所有工具。whale-acp 默认权限为 **ask**（`permissions.default = "ask"`）：未显式允许的
+操作会通过 `session/request_permission` 请求用户批准。如需恢复宽松行为，在
+`config.toml` 中设置 `permissions.default = "allow"`；如需更严格，设置 `permissions.default = "deny"` 并
+配以显式 `permissions` 段。
+
 ## stdio examples
 
 Filesystem server:

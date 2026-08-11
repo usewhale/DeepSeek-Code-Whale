@@ -105,6 +105,14 @@ func (c *Client) Start(ctx context.Context) error {
 	}
 	c.readyCh = make(chan struct{})
 	readyCh := c.readyCh
+	// Publish procDone up front so Close (and its test) can always observe a
+	// process-tracking channel once a start attempt is in flight. The starting
+	// CAS above is visible to isStarting() before the spawn block below stores
+	// procDone, so Close must never see procDone == nil for a start that has
+	// begun; the reaper goroutine closes the same channel when cmd.Wait()
+	// returns.
+	procDone := make(chan struct{})
+	c.procDone = procDone
 	c.mu.Unlock()
 	defer c.starting.Store(false)
 	// Release concurrent waiters even when startup fails (they check
@@ -168,8 +176,8 @@ func (c *Client) Start(ctx context.Context) error {
 	// Wait for the process in the background to release OS resources.
 	// procDone signals that the process has actually been reaped — on
 	// Windows an unreaped process still holds handles on its working
-	// directory.
-	procDone := make(chan struct{})
+	// directory. The channel was published before the spawn so Close can
+	// always wait on it; the goroutine closes it once cmd.Wait() returns.
 	go func() {
 		defer close(procDone)
 		if err := cmd.Wait(); err != nil {

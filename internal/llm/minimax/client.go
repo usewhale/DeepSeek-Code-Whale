@@ -24,7 +24,6 @@ type Options struct {
 	APIKeyEnv         string
 	BaseURL           string
 	Model             string
-	ReasoningEffort   string
 	ThinkingEnabled   bool
 	MaxTokens         int
 	RetryPolicy       llmretry.Policy
@@ -53,12 +52,19 @@ func New(opts Options) (llm.Provider, error) {
 		baseURL = DefaultBaseURL
 	}
 	thinkingEnabled := opts.ThinkingEnabled || defaults.IsMiniMaxM27Model(model)
+	thinkingConfig := deepseek.ChatCompletionsThinkingConfig{
+		EnabledType:    "adaptive",
+		ReasoningSplit: true,
+	}
+	if defaults.IsMiniMaxM27Model(model) {
+		thinkingConfig.Omit = true
+	}
 	dsOpts := []deepseek.Option{
 		deepseek.WithAPIKey(apiKey),
 		deepseek.WithBaseURL(baseURL),
 		deepseek.WithModel(model),
 		deepseek.WithThinking(thinkingEnabled),
-		deepseek.WithReasoningEffort(opts.ReasoningEffort),
+		deepseek.WithChatCompletionsThinking(thinkingConfig),
 	}
 	if defaults.IsMiniMaxM3Model(model) {
 		dsOpts = append(dsOpts, deepseek.WithMultimodal(deepseek.MultimodalConfig{

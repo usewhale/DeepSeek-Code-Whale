@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/usewhale/whale/internal/agent"
 	"github.com/usewhale/whale/internal/core"
@@ -30,6 +31,9 @@ func (h *Handler) handlePrompt(req *RPCRequest) *RPCErrorResponse {
 	// Look up session context.
 	h.mu.Lock()
 	sctx, ok := h.sessions[params.SessionID]
+	if ok {
+		sctx.lastUsed = time.Now()
+	}
 	h.mu.Unlock()
 	if !ok {
 		return NewErrorResponse(req.ID, ErrCodeInvalidParams, fmt.Sprintf("session not found: %s", params.SessionID))
@@ -40,7 +44,18 @@ func (h *Handler) handlePrompt(req *RPCRequest) *RPCErrorResponse {
 	// the order prompts acquire the session's promptMu.
 	ctx, cancel := context.WithCancel(context.Background())
 	run := &promptRun{cancel: cancel}
+	// Re-resolve the session under the lock rather than trusting the earlier
+	// lookup: between that lookup and this registration, session/delete or LRU
+	// eviction may have removed the session (both under h.mu). Registering into
+	// a stale context and running the turn anyway would execute on a closed
+	// runtime and — for delete — resurrect the .jsonl the delete just removed.
 	h.mu.Lock()
+	sctx, ok = h.sessions[params.SessionID]
+	if !ok {
+		h.mu.Unlock()
+		cancel()
+		return NewErrorResponse(req.ID, ErrCodeInvalidParams, fmt.Sprintf("session not found: %s", params.SessionID))
+	}
 	if sctx.runs == nil {
 		sctx.runs = make(map[*promptRun]struct{})
 	}
@@ -249,6 +264,12 @@ func (h *Handler) translateEvent(ev agent.AgentEvent) *SessionUpdate {
 		// End of stream — handled by the caller.
 		return nil
 
+	case agent.AgentEventTypeContextCompacted:
+		// Compaction is an internal history rewrite, not agent output Zed
+		// renders. Drop it deliberately (nil) so it is never surfaced as a
+		// stray message chunk; the turn continues normally after the rewrite.
+		return nil
+
 	default:
 		return nil
 	}
@@ -354,10 +375,20 @@ func NewACPApprovalFunc(transport *Transport) policy.ApprovalFunc {
 				Status:     ToolCallStatusPending,
 			},
 			Options: []PermissionOption{
-				{OptionID: "once", Kind: "allow_once", Name: "Allow once"},
-				{OptionID: "always", Kind: "allow_always", Name: "Always allow"},
-				{OptionID: "reject", Kind: "reject_once", Name: "Reject"},
+				{OptionID: "once", Kind: KindAllowOnce, Name: "Allow once"},
+				{OptionID: "always", Kind: KindAllowAlways, Name: "Always allow"},
+				{OptionID: "reject", Kind: KindRejectOnce, Name: "Reject"},
 			},
+		}
+
+		// Refuse to send an unserializable request: the ACP client's strict
+		// serde enum rejects unknown PermissionOptionKind values at
+		// deserialization, which surfaces as a silent approval denial. Deny
+		// loudly here instead, so a newly added invalid kind can never reach
+		// the wire.
+		if bad, ok := invalidPermissionOptionKind(permReq.Options); ok {
+			Logger.Printf("refusing to send request_permission: invalid option kind %q — denying", bad)
+			return policy.ApprovalDeny
 		}
 
 		resp, err := transport.CallClientMethod(req.SessionID, MethodSessionRequestPerm, permReq)
@@ -396,4 +427,17 @@ func NewACPApprovalFunc(transport *Transport) policy.ApprovalFunc {
 			return policy.ApprovalDeny
 		}
 	}
+}
+
+// invalidPermissionOptionKind returns the first option whose kind is not one
+// of the four schema-defined PermissionOptionKind values, and whether any such
+// option exists. Kept as a standalone helper so the send-path guard in
+// NewACPApprovalFunc is directly testable.
+func invalidPermissionOptionKind(opts []PermissionOption) (PermissionOptionKind, bool) {
+	for _, opt := range opts {
+		if !opt.Kind.Valid() {
+			return opt.Kind, true
+		}
+	}
+	return "", false
 }

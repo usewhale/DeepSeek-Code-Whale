@@ -9,6 +9,7 @@ import (
 func (s *Service) DispatchProtocol(in protocol.Intent) {
 	s.Dispatch(Intent{
 		Kind:               serviceIntentKind(in.Kind),
+		InterruptSource:    in.InterruptSource,
 		Input:              in.Input,
 		ClientInputID:      in.ClientInputID,
 		HiddenInput:        in.HiddenInput,
@@ -41,6 +42,7 @@ func (s *Service) DispatchProtocol(in protocol.Intent) {
 		WorkflowSaveAs:     in.WorkflowSaveAs,
 		WorkflowScriptPath: in.WorkflowScriptPath,
 		AutoReview:         in.AutoReview,
+		Quiet:              in.Quiet,
 	})
 }
 

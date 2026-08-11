@@ -130,15 +130,15 @@ func TestSuggestionsRenderAboveComposerBoundary(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			m := newModel(nil, "deepseek-v4-pro", "normal", "on")
-			m.width = 80
+			m.width = 100
 			m.height = 24
 			m.cwd = "~/Engineer/ai/dsk/whale"
 			tt.setup(&m)
 
-			bottom := xansi.Strip(m.renderBottom(80))
+			bottom := xansi.Strip(m.renderBottom(100))
 			lines := strings.Split(strings.TrimRight(bottom, "\n"), "\n")
 			suggestionIdx := firstLineContaining(lines, tt.panelText)
-			boundaryIdx := firstFullWidthBoundaryLine(lines, 80)
+			boundaryIdx := firstFullWidthBoundaryLine(lines, 100)
 			composerIdx := firstLineContaining(lines, tt.inputText)
 			footerIdx := len(lines) - 1
 
@@ -1160,7 +1160,7 @@ func TestEnterWhileBusyBlocksSlashCommandsWithoutQueueing(t *testing.T) {
 }
 func TestChatFooterFollowsContentAfterSlashSuggestionsClose(t *testing.T) {
 	m := newModel(nil, "deepseek-v4-pro", "normal", "on")
-	m.width = 80
+	m.width = 100
 	m.height = 24
 	m.cwd = "~/Engineer/ai/dsk/whale"
 
@@ -1493,5 +1493,98 @@ func TestBtwExactSlashEnterShowsUsage(t *testing.T) {
 	}
 	if got := (*intents)[0]; got.Kind != protocol.IntentSubmitLocal || got.Input != "/btw" {
 		t.Fatalf("unexpected intent: %+v", got)
+	}
+}
+func TestSlashSuggestionNavigationWrapsAround(t *testing.T) {
+	m, _ := newModelWithDispatchSpy()
+	m.input.SetValue("/")
+	m.updateSlashMatches()
+	count := len(m.slash.matches)
+	if count < 2 {
+		t.Fatalf("expected at least two slash suggestions, got %d", count)
+	}
+
+	// Down from the last item wraps back to the first.
+	m.slash.selected = count - 1
+	m, _ = updateTestModel(t, m, tea.KeyMsg{Type: tea.KeyDown})
+	if m.slash.selected != 0 {
+		t.Fatalf("expected down at last to wrap to first, got %d", m.slash.selected)
+	}
+
+	// Up from the first item wraps to the last.
+	m, _ = updateTestModel(t, m, tea.KeyMsg{Type: tea.KeyUp})
+	if m.slash.selected != count-1 {
+		t.Fatalf("expected up at first to wrap to last, got %d", m.slash.selected)
+	}
+}
+func TestSkillSuggestionNavigationWrapsAround(t *testing.T) {
+	m, _ := newModelWithDispatchSpy()
+	m.skills.all = []skillSuggestion{
+		{Name: "code-review", Description: "Review local changes"},
+		{Name: "git-worktree", Description: "Create an isolated worktree"},
+		{Name: "grill-me", Description: "Interview the user relentlessly"},
+		{Name: "skill-creator", Description: "Create or update skills"},
+	}
+	m.input.SetValue("$")
+	m.updateSlashMatches()
+	if len(m.skills.matches) != 4 {
+		t.Fatalf("expected four skill matches, got %+v", m.skills.matches)
+	}
+
+	// Up from the first item wraps to the last.
+	m.skills.selected = 0
+	m, _ = updateTestModel(t, m, tea.KeyMsg{Type: tea.KeyUp})
+	if m.skills.selected != 3 {
+		t.Fatalf("expected up at first to wrap to last, got %d", m.skills.selected)
+	}
+
+	// Down from the last item wraps back to the first.
+	m, _ = updateTestModel(t, m, tea.KeyMsg{Type: tea.KeyDown})
+	if m.skills.selected != 0 {
+		t.Fatalf("expected down at last to wrap to first, got %d", m.skills.selected)
+	}
+}
+func TestFileSuggestionNavigationWrapsAround(t *testing.T) {
+	m, _ := newModelWithDispatchSpy()
+	m.files.matches = []fileSuggestion{
+		{Path: "a.go"},
+		{Path: "b.go"},
+		{Path: "c.go"},
+	}
+	m.files.selected = 2
+
+	// Down from the last item wraps back to the first.
+	m, _ = updateTestModel(t, m, tea.KeyMsg{Type: tea.KeyDown})
+	if m.files.selected != 0 {
+		t.Fatalf("expected down at last to wrap to first, got %d", m.files.selected)
+	}
+
+	// Up from the first item wraps to the last.
+	m, _ = updateTestModel(t, m, tea.KeyMsg{Type: tea.KeyUp})
+	if m.files.selected != 2 {
+		t.Fatalf("expected up at first to wrap to last, got %d", m.files.selected)
+	}
+}
+func TestHelpCommandNavigationWrapsAround(t *testing.T) {
+	m, _ := newModelWithDispatchSpy()
+	m.width = 100
+	m.height = 18
+	m.openHelp()
+	count := len(helpCommands())
+	if count < 2 {
+		t.Fatalf("expected at least two help commands, got %d", count)
+	}
+
+	// Up from the first item wraps to the last.
+	m.help.selected = 0
+	m, _ = updateTestModel(t, m, tea.KeyMsg{Type: tea.KeyUp})
+	if m.help.selected != count-1 {
+		t.Fatalf("expected up at first to wrap to last, got %d", m.help.selected)
+	}
+
+	// Down from the last item wraps back to the first.
+	m, _ = updateTestModel(t, m, tea.KeyMsg{Type: tea.KeyDown})
+	if m.help.selected != 0 {
+		t.Fatalf("expected down at last to wrap to first, got %d", m.help.selected)
 	}
 }

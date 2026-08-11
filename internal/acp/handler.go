@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/usewhale/whale/internal/agent"
 	"github.com/usewhale/whale/internal/core"
@@ -36,11 +38,17 @@ type Handler struct {
 type SessionRuntime struct {
 	Agent   *agent.Agent
 	Toolset *tools.Toolset
+
+	// Close releases per-session resources (e.g. connected MCP servers) when
+	// the session ends or the process shuts down. May be nil.
+	Close func()
 }
 
 // SessionRuntimeFactory builds a runtime scoped to a session's cwd. It is
-// invoked once per session (at session/new or session/load).
-type SessionRuntimeFactory func(acpSessionID, cwd string) (*SessionRuntime, error)
+// invoked once per session (at session/new or session/load). mcps are the MCP
+// servers the client wants the agent to connect to; ACP carries them on both
+// session/new and session/load.
+type SessionRuntimeFactory func(acpSessionID, cwd string, mcps []MCPServer) (*SessionRuntime, error)
 
 // sessionMeta is the persisted, cross-restart state for a session. Messages
 // live in the message store; this sidecar captures the context that ACP's
@@ -66,6 +74,43 @@ type sessionContext struct {
 	runs           map[*promptRun]struct{} // in-flight prompts, guarded by Handler.mu
 	cwd            string
 	mode           session.Mode
+	lastUsed       time.Time // guarded by Handler.mu, for LRU eviction
+}
+
+// maxLiveSessions bounds concurrently live sessions. ACP v1 has no
+// session/delete, so without a cap a long-lived host that keeps creating
+// sessions would leak runtimes and connected MCP servers.
+const maxLiveSessions = 64
+
+// evictIfOverLimit removes the least-recently-used session when live sessions
+// exceed maxLiveSessions, returning its runtime so the caller can release it
+// (e.g. close MCP servers) outside the handler lock.
+func (h *Handler) evictIfOverLimit() *SessionRuntime {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if len(h.sessions) <= maxLiveSessions {
+		return nil
+	}
+	var oldestID string
+	var oldest time.Time
+	for id, sctx := range h.sessions {
+		// Never evict a session with an in-flight prompt: closing its runtime
+		// (e.g. MCP servers) mid-turn would break that turn's tool calls.
+		if len(sctx.runs) > 0 {
+			continue
+		}
+		if oldestID == "" || sctx.lastUsed.Before(oldest) {
+			oldestID, oldest = id, sctx.lastUsed
+		}
+	}
+	if oldestID == "" {
+		Logger.Printf("session cap %d exceeded but all live sessions are busy; skipping eviction", maxLiveSessions)
+		return nil
+	}
+	rt := h.sessions[oldestID].runtime
+	delete(h.sessions, oldestID)
+	Logger.Printf("evicting least-recently-used session %s (live sessions exceed %d)", oldestID, maxLiveSessions)
+	return rt
 }
 
 func NewHandler(transport *Transport, msgStore store.MessageStore, defaultCwd string) *Handler {
@@ -81,11 +126,39 @@ func NewHandler(transport *Transport, msgStore store.MessageStore, defaultCwd st
 func (h *Handler) SetRuntimeFactory(fn SessionRuntimeFactory) { h.newRuntime = fn }
 
 // buildRuntime creates a session-scoped runtime via the configured factory.
-func (h *Handler) buildRuntime(acpSessionID, cwd string) (*SessionRuntime, error) {
+func (h *Handler) buildRuntime(acpSessionID, cwd string, mcps []MCPServer) (*SessionRuntime, error) {
 	if h.newRuntime == nil {
 		return nil, fmt.Errorf("no session runtime factory configured")
 	}
-	return h.newRuntime(acpSessionID, cwd)
+	return h.newRuntime(acpSessionID, cwd, mcps)
+}
+
+// CloseSessions tears down every live session runtime, releasing per-session
+// resources such as connected MCP servers. Safe to call once at shutdown;
+// sessions without a Close hook are skipped.
+func (h *Handler) CloseSessions() {
+	h.mu.Lock()
+	sessions := make([]*SessionRuntime, 0, len(h.sessions))
+	for _, sctx := range h.sessions {
+		if sctx.runtime != nil {
+			sessions = append(sessions, sctx.runtime)
+		}
+	}
+	h.mu.Unlock()
+	// Close in parallel: an MCP stdio close can take up to ~5s per session
+	// (grace + hard limit), so sequential teardown would stall shutdown.
+	var wg sync.WaitGroup
+	for _, rt := range sessions {
+		if rt.Close == nil {
+			continue
+		}
+		wg.Add(1)
+		go func(closeFn func()) {
+			defer wg.Done()
+			closeFn()
+		}(rt.Close)
+	}
+	wg.Wait()
 }
 
 // SetSessionsDir sets the directory used to persist per-session metadata
@@ -219,6 +292,10 @@ func (h *Handler) handleRequest(req *RPCRequest) {
 		errResp = h.handleSessionNew(req)
 	case MethodSessionLoad:
 		errResp = h.handleSessionLoad(req)
+	case MethodSessionList:
+		errResp = h.handleSessionList(req)
+	case MethodSessionDelete:
+		errResp = h.handleSessionDelete(req)
 	case MethodSessionSetMode:
 		errResp = h.handleSetMode(req)
 	case MethodSessionCancel:
@@ -258,6 +335,10 @@ func (h *Handler) handleInitialize(req *RPCRequest) *RPCErrorResponse {
 				Image: false, Audio: false, EmbeddedContext: true,
 			},
 			MCPCapabilities: &MCPCapabilities{HTTP: false, SSE: false},
+			SessionCapabilities: &SessionCapabilities{
+				List:   &SessionListCapabilities{},
+				Delete: &SessionDeleteCapabilities{},
+			},
 		},
 		AgentInfo: &Implementation{Name: "whale", Title: "Whale", Version: "0.1.0"},
 	}))
@@ -279,13 +360,20 @@ func (h *Handler) handleSessionNew(req *RPCRequest) *RPCErrorResponse {
 	if cwd == "" {
 		cwd = h.defaultCwd
 	}
-	rt, err := h.buildRuntime(whaleSessionID, cwd)
+	rt, err := h.buildRuntime(whaleSessionID, cwd, params.MCPServers)
 	if err != nil {
 		return NewErrorResponse(req.ID, ErrCodeInternal, fmt.Sprintf("failed to initialize session: %v", err))
 	}
 	h.mu.Lock()
-	h.sessions[whaleSessionID] = &sessionContext{whaleSessionID: whaleSessionID, runtime: rt, cwd: cwd, mode: session.ModeAgent}
+	h.sessions[whaleSessionID] = &sessionContext{whaleSessionID: whaleSessionID, runtime: rt, cwd: cwd, mode: session.ModeAgent, lastUsed: time.Now()}
 	h.mu.Unlock()
+	// Close the evicted runtime off the session/new critical path: an MCP
+	// stdio close can take up to ~5s, which would otherwise stall session
+	// creation. Safe because eviction never targets sessions with active
+	// prompts, so nothing references the evicted runtime afterwards.
+	if evicted := h.evictIfOverLimit(); evicted != nil && evicted.Close != nil {
+		go evicted.Close()
+	}
 	h.saveSessionMeta(whaleSessionID, sessionMeta{Cwd: cwd, Mode: session.ModeAgent})
 	Logger.Printf("new session: acp=%s cwd=%s", whaleSessionID, cwd)
 	h.transport.SendResponse(NewSuccessResponse(req.ID, NewSessionResponse{
@@ -335,18 +423,24 @@ func (h *Handler) handleSessionLoad(req *RPCRequest) *RPCErrorResponse {
 	}
 	h.mu.Lock()
 	_, exists := h.sessions[params.SessionID]
+	if exists {
+		h.sessions[params.SessionID].lastUsed = time.Now()
+	}
 	h.mu.Unlock()
 	if !exists {
-		rt, err := h.buildRuntime(params.SessionID, cwd)
+		rt, err := h.buildRuntime(params.SessionID, cwd, params.MCPServers)
 		if err != nil {
 			return NewErrorResponse(req.ID, ErrCodeInternal, fmt.Sprintf("failed to initialize session: %v", err))
 		}
 		h.mu.Lock()
 		// Re-check under lock in case a concurrent load created it first.
 		if _, exists := h.sessions[params.SessionID]; !exists {
-			h.sessions[params.SessionID] = &sessionContext{whaleSessionID: params.SessionID, runtime: rt, cwd: cwd, mode: mode}
+			h.sessions[params.SessionID] = &sessionContext{whaleSessionID: params.SessionID, runtime: rt, cwd: cwd, mode: mode, lastUsed: time.Now()}
 		}
 		h.mu.Unlock()
+		if evicted := h.evictIfOverLimit(); evicted != nil && evicted.Close != nil {
+			go evicted.Close()
+		}
 		// Persist the resolved cwd/mode so a subsequent load (or a restart where
 		// the sidecar was never written) stays consistent with the runtime we
 		// just built. An already-live session keeps its established runtime, so
@@ -375,6 +469,199 @@ func (h *Handler) handleSessionLoad(req *RPCRequest) *RPCErrorResponse {
 	h.transport.SendResponse(NewSuccessResponse(req.ID, LoadSessionResponse{
 		Modes: sessionModeState(currentMode),
 	}))
+	return nil
+}
+
+// handleSessionList implements the ACP session/list method: the persisted
+// session history that clients such as Zed's agent panel expose as "previous
+// sessions". Sessions are read from the same directory as the message store
+// (h.metaDir) so every listed id resolves through session/load. The list is
+// not paginated — whale-acp keeps at most a few dozen sessions per host — so
+// a single response is returned with no nextCursor.
+func (h *Handler) handleSessionList(req *RPCRequest) *RPCErrorResponse {
+	var params ListSessionsRequest
+	// Params are optional ({}): a client that omits the params object sends
+	// nil, which json.Unmarshal would reject.
+	if len(req.Params) > 0 {
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			return NewErrorResponse(req.ID, ErrCodeInvalidParams, fmt.Sprintf("invalid params: %v", err))
+		}
+	}
+	sessionsDir := h.metaDir
+	if sessionsDir == "" {
+		return NewErrorResponse(req.ID, ErrCodeInternal, "session store not configured")
+	}
+	// Normalize the filter: the stored cwd is what the client sent on
+	// session/new (verbatim), so a trailing slash or symlinked spelling would
+	// otherwise silently miss. filepath.Clean makes "/work/" and "/work" agree
+	// without touching how cwd is stored.
+	filterCwd := strings.TrimSpace(params.Cwd)
+	if filterCwd != "" {
+		filterCwd = filepath.Clean(filterCwd)
+	}
+
+	entries, err := os.ReadDir(sessionsDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			h.transport.SendResponse(NewSuccessResponse(req.ID, ListSessionsResponse{Sessions: []SessionInfo{}}))
+			return nil
+		}
+		return NewErrorResponse(req.ID, ErrCodeInternal, fmt.Sprintf("failed to list sessions: %v", err))
+	}
+	type candidate struct {
+		id         string
+		cwd        string
+		lastActive time.Time
+	}
+	var cands []candidate
+	for _, e := range entries {
+		if e.IsDir() || !core.IsSessionJSONLName(e.Name()) {
+			continue
+		}
+		id := strings.TrimSuffix(e.Name(), ".jsonl")
+		if id == "" || session.IsSubagentSessionID(id) {
+			continue
+		}
+		meta, _ := h.loadSessionMeta(id)
+		cwd := strings.TrimSpace(meta.Cwd)
+		if cwd == "" {
+			cwd = h.defaultCwd
+		} else {
+			cwd = filepath.Clean(cwd)
+		}
+		if filterCwd != "" && cwd != filterCwd {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		// UpdatedAt is the last message's persisted timestamp (backward tail
+		// read): it is the true last-activity time and survives file rewrites —
+		// compaction and session forking rewrite the .jsonl via tmp+rename,
+		// which would otherwise bump a pure mtime proxy. Falls back to the
+		// file mtime when the tail is empty or unparseable.
+		lastActive := info.ModTime()
+		if t, ok := session.LastMessageUpdatedAt(sessionsDir, id); ok {
+			lastActive = t
+		}
+		cands = append(cands, candidate{id: id, cwd: cwd, lastActive: lastActive})
+	}
+	sort.Slice(cands, func(i, j int) bool {
+		if !cands[i].lastActive.Equal(cands[j].lastActive) {
+			return cands[i].lastActive.After(cands[j].lastActive)
+		}
+		// Deterministic tie-break for equal timestamps (unstable sort).
+		return cands[i].id < cands[j].id
+	})
+
+	out := make([]SessionInfo, 0, len(cands))
+	for _, c := range cands {
+		title, err := session.FirstVisibleUserMessage(sessionsDir, c.id)
+		if err != nil || strings.TrimSpace(title) == "" {
+			title = "(no message yet)"
+		}
+		out = append(out, SessionInfo{
+			SessionID: c.id,
+			Cwd:       c.cwd,
+			Title:     title,
+			UpdatedAt: c.lastActive.UTC().Format(time.RFC3339),
+		})
+	}
+	h.transport.SendResponse(NewSuccessResponse(req.ID, ListSessionsResponse{Sessions: out}))
+	return nil
+}
+
+// handleSessionDelete implements the ACP session/delete method: it removes a
+// persisted session so it disappears from session/list and can no longer be
+// loaded. Delete is idempotent — an unknown session deletes successfully
+// (Zed refreshes its list regardless), matching the ACP schema where the
+// client owns list refresh.
+//
+// The one refused case is a session with an in-flight prompt. Every writer
+// that appends to or rewrites the session's .jsonl (turn-message append,
+// auto-compaction's tmp+rename) runs only while a turn is active — the same
+// invariant eviction relies on. Without this guard, deleting the file while a
+// prompt is mid-turn would let the prompt recreate it (file resurrection) and
+// the session would reappear on the next list refresh.
+func (h *Handler) handleSessionDelete(req *RPCRequest) *RPCErrorResponse {
+	var params DeleteSessionRequest
+	// Params are required here (unlike session/list): a delete for no session
+	// is meaningless, and a client that omits them sent an invalid request.
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		return NewErrorResponse(req.ID, ErrCodeInvalidParams, fmt.Sprintf("invalid params: %v", err))
+	}
+	id := strings.TrimSpace(params.SessionID)
+	if id == "" || !isSafeSessionID(id) {
+		return NewErrorResponse(req.ID, ErrCodeInvalidParams, fmt.Sprintf("invalid sessionId: %q", params.SessionID))
+	}
+	sessionsDir := h.metaDir
+	if sessionsDir == "" {
+		return NewErrorResponse(req.ID, ErrCodeInternal, "session store not configured")
+	}
+
+	// Live-session handling under h.mu: refuse in-flight prompts; otherwise
+	// drop the session from the map and close its runtime off the request path
+	// (an MCP stdio close can take ~5s — mirrors eviction).
+	var closeFn func()
+	h.mu.Lock()
+	if sctx, ok := h.sessions[id]; ok {
+		if len(sctx.runs) > 0 {
+			h.mu.Unlock()
+			return NewErrorResponse(req.ID, ErrCodeInternal, "session has an in-flight prompt; cannot delete")
+		}
+		delete(h.sessions, id)
+		if sctx.runtime != nil {
+			closeFn = sctx.runtime.Close
+		}
+	}
+	h.mu.Unlock()
+	if closeFn != nil {
+		go closeFn()
+	}
+
+	if err := removeSessionFiles(sessionsDir, id); err != nil {
+		Logger.Printf("failed to delete session %s: %v", id, err)
+		return NewErrorResponse(req.ID, ErrCodeInternal, fmt.Sprintf("failed to delete session files: %v", err))
+	}
+	Logger.Printf("session deleted: %s", id)
+	h.transport.SendResponse(NewSuccessResponse(req.ID, DeleteSessionResponse{}))
+	return nil
+}
+
+// removeSessionFiles deletes a session's persisted artifacts. The primary
+// .jsonl is fatal on failure — the session's history must not silently
+// survive — while the sidecars are best-effort: they cover both the ACP
+// writers (meta sidecar) and the shared store convention (approvals file,
+// telemetry event logs, stale .jsonl.tmp left by an interrupted rewrite),
+// and a leftover sidecar alone must not fail a successful delete.
+func removeSessionFiles(sessionsDir, id string) error {
+	name := core.SanitizeSessionID(id)
+	primary := filepath.Join(sessionsDir, name+".jsonl")
+	if err := os.Remove(primary); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove session file: %w", err)
+	}
+	for _, suffix := range []string{
+		".meta.json",
+		// Session-scoped sidecars persisted by the state helpers under
+		// internal/session: mode (mode_state.go), todos (todo_state.go),
+		// pending user-input questions (user_input_state.go), and goal
+		// (goal_state.go). Deleting the thread must not leave these behind —
+		// they would resurrect mode/todos/objective on a future load.
+		".state.json",
+		".todo.json",
+		".user_input.json",
+		".goal.json",
+		core.ApprovalEventsSuffix,
+		core.ToolInputEventsSuffix,
+		".approvals.json",
+		".jsonl.tmp",
+	} {
+		path := filepath.Join(sessionsDir, name+suffix)
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			Logger.Printf("failed to remove %s for session %s: %v", suffix, id, err)
+		}
+	}
 	return nil
 }
 

@@ -56,3 +56,27 @@ func TestParseSessionChoiceDisplayHandlesNonASCIIBranch(t *testing.T) {
 		t.Fatalf("rendered session row contains replacement characters:\n%s", rendered)
 	}
 }
+func TestSessionChoiceNavigationWrapsAround(t *testing.T) {
+	rows := []string{
+		"recent sessions:",
+		"*  1) 4s ago    -                        who are you",
+		"   2) 1m ago    main                     hello",
+		"   3) 5m ago    feat/x                   git status",
+	}
+	// Down from the last selectable row wraps to the first selectable row.
+	if got := nextSessionChoiceIndex(rows, 3); got != 1 {
+		t.Fatalf("expected down at last to wrap to first, got %d", got)
+	}
+	// Up from the first selectable row wraps to the last selectable row.
+	if got := prevSessionChoiceIndex(rows, 1); got != 3 {
+		t.Fatalf("expected up at first to wrap to last, got %d", got)
+	}
+	// A single selectable row stays put on both directions.
+	only := []string{"recent sessions:", "   1) 4s ago    -                        who are you"}
+	if got := prevSessionChoiceIndex(only, 1); got != 1 {
+		t.Fatalf("expected up to stay on only selectable row, got %d", got)
+	}
+	if got := nextSessionChoiceIndex(only, 1); got != 1 {
+		t.Fatalf("expected down to stay on only selectable row, got %d", got)
+	}
+}

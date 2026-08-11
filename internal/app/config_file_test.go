@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/usewhale/whale/internal/llm/deepseek"
 	"github.com/usewhale/whale/internal/plugins"
 	"github.com/usewhale/whale/internal/policy"
 	"github.com/usewhale/whale/internal/tools"
@@ -200,6 +201,40 @@ func TestApplyFileConfigRejectsInvalidProvider(t *testing.T) {
 	err := ApplyFileConfig(&cfg, FileConfig{Provider: "missing"})
 	if err == nil || !strings.Contains(err.Error(), "invalid provider") {
 		t.Fatalf("error = %v, want invalid provider", err)
+	}
+}
+
+func TestApplyFileConfigSupportsDeepSeekWebSearchMode(t *testing.T) {
+	for _, tc := range []struct {
+		value string
+		want  deepseek.WebSearchMode
+	}{
+		{value: "local", want: deepseek.WebSearchModeLocal},
+		{value: "server", want: deepseek.WebSearchModeServer},
+		{value: "auto", want: deepseek.WebSearchModeAuto},
+		{value: "Server", want: deepseek.WebSearchModeServer},
+	} {
+		cfg := DefaultConfig()
+		if err := ApplyFileConfig(&cfg, FileConfig{
+			Providers: FileProvidersConfig{
+				DeepSeek: FileDeepSeekProviderConfig{WebSearch: tc.value},
+			},
+		}); err != nil {
+			t.Fatalf("ApplyFileConfig(%q): %v", tc.value, err)
+		}
+		if cfg.DeepSeekWebSearch != tc.want {
+			t.Fatalf("web_search(%q) = %q, want %q", tc.value, cfg.DeepSeekWebSearch, tc.want)
+		}
+	}
+	// Invalid values are rejected.
+	cfg := DefaultConfig()
+	err := ApplyFileConfig(&cfg, FileConfig{
+		Providers: FileProvidersConfig{
+			DeepSeek: FileDeepSeekProviderConfig{WebSearch: "bogus"},
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "web_search") {
+		t.Fatalf("error = %v, want invalid web_search error", err)
 	}
 }
 
@@ -1142,4 +1177,96 @@ func TestSetModelAndThinkingPersistToConfig(t *testing.T) {
 	if loaded.ThinkingEnabled == nil || *loaded.ThinkingEnabled {
 		t.Fatal("persisted thinking_enabled: want false")
 	}
+}
+
+func TestApplyFileConfigSupportsDeepSeekAPI(t *testing.T) {
+	for _, tc := range []struct {
+		value string
+		want  deepseek.API
+	}{
+		{value: "responses", want: deepseek.APIResponses},
+		{value: "chat_completions", want: deepseek.APIChatCompletions},
+		{value: "auto", want: deepseek.APIAuto},
+		{value: "Responses", want: deepseek.APIResponses},
+	} {
+		cfg := DefaultConfig()
+		if err := ApplyFileConfig(&cfg, FileConfig{
+			Providers: FileProvidersConfig{
+				DeepSeek: FileDeepSeekProviderConfig{API: tc.value},
+			},
+		}); err != nil {
+			t.Fatalf("ApplyFileConfig api(%q): %v", tc.value, err)
+		}
+		if cfg.DeepSeekAPI != tc.want {
+			t.Fatalf("api(%q) = %q, want %q", tc.value, cfg.DeepSeekAPI, tc.want)
+		}
+	}
+	// Strict grammar: aliases are rejected, matching NormalizeWebSearchMode's
+	// strict precedent.
+	cfg := DefaultConfig()
+	err := ApplyFileConfig(&cfg, FileConfig{
+		Providers: FileProvidersConfig{
+			DeepSeek: FileDeepSeekProviderConfig{API: "completions"},
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "api") {
+		t.Fatalf("error = %v, want invalid api error", err)
+	}
+}
+
+func TestLoadAndApplyConfigResolvesAPITransport(t *testing.T) {
+	dataDir := t.TempDir()
+	workspace := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(workspace, ".whale"), 0o755); err != nil {
+		t.Fatalf("mkdir .whale: %v", err)
+	}
+	if err := SaveConfigFile(GlobalConfigPath(dataDir), FileConfig{
+		Providers: FileProvidersConfig{
+			DeepSeek: FileDeepSeekProviderConfig{WebSearch: "server"},
+		},
+	}); err != nil {
+		t.Fatalf("save global: %v", err)
+	}
+
+	t.Run("env chat_completions degrades server search to local", func(t *testing.T) {
+		t.Setenv("WHALE_API", "chat_completions")
+		cfg := DefaultConfig()
+		cfg.DataDir = dataDir
+		loaded, err := LoadAndApplyConfig(cfg, workspace)
+		if err != nil {
+			t.Fatalf("LoadAndApplyConfig: %v", err)
+		}
+		if loaded.DeepSeekAPI != deepseek.APIChatCompletions {
+			t.Fatalf("api = %q, want chat_completions (env wins)", loaded.DeepSeekAPI)
+		}
+		if loaded.DeepSeekWebSearch != deepseek.WebSearchModeLocal {
+			t.Fatalf("web_search = %q, want degraded local", loaded.DeepSeekWebSearch)
+		}
+	})
+
+	t.Run("config server without api implies responses", func(t *testing.T) {
+		t.Setenv("WHALE_API", "")
+		cfg := DefaultConfig()
+		cfg.DataDir = dataDir
+		loaded, err := LoadAndApplyConfig(cfg, workspace)
+		if err != nil {
+			t.Fatalf("LoadAndApplyConfig: %v", err)
+		}
+		if loaded.DeepSeekAPI != deepseek.APIResponses {
+			t.Fatalf("api = %q, want responses implied by web_search=server", loaded.DeepSeekAPI)
+		}
+		if loaded.DeepSeekWebSearch != deepseek.WebSearchModeServer {
+			t.Fatalf("web_search = %q, want server preserved", loaded.DeepSeekWebSearch)
+		}
+	})
+
+	t.Run("invalid WHALE_API rejected", func(t *testing.T) {
+		t.Setenv("WHALE_API", "completions")
+		cfg := DefaultConfig()
+		cfg.DataDir = dataDir
+		_, err := LoadAndApplyConfig(cfg, workspace)
+		if err == nil || !strings.Contains(err.Error(), "WHALE_API") {
+			t.Fatalf("error = %v, want WHALE_API rejection", err)
+		}
+	})
 }

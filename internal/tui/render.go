@@ -114,9 +114,11 @@ func (m model) renderBottom(mainWidth int) string {
 		"  " + footerField("thinking:", m.thinking, thinkingFooterColor(m.thinking))
 	switch permissionsMode(m.autoAccept, m.autoReviewEnabled) {
 	case "auto-review":
-		footerText += "  " + footerAutoAccept("auto-review")
+		footerText += "  " + footerAutoAccept("auto-review") + " " + footerHint("(Alt+P to cycle)")
 	case "auto-accept":
-		footerText += "  " + footerAutoAccept("auto-accept on")
+		footerText += "  " + footerAutoAccept("auto-accept on") + " " + footerHint("(Alt+P to cycle)")
+	default:
+		footerText += "  " + footerField("permission:", "ask", tuitheme.Default.Muted) + " " + footerHint("(Alt+P to cycle)")
 	}
 	if m.chatMode == "ask" || m.chatMode == "plan" {
 		footerText += "  " + footerField("mode:", m.chatMode, tuitheme.Default.Plan) +

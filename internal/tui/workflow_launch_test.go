@@ -538,3 +538,32 @@ func workflowLaunchTestResult() *protocol.LocalResult {
 		},
 	}
 }
+func TestWorkflowLaunchNavigationWrapsAround(t *testing.T) {
+	m := model{
+		assembler: tuirender.NewAssembler(),
+		mode:      modeWorkflowLaunch,
+		width:     100,
+		height:    30,
+		workflowLaunch: struct {
+			result    *protocol.LocalResult
+			selected  int
+			rawScroll int
+		}{result: workflowLaunchTestResult()},
+	}
+	actions := workflowLaunchActions(m.workflowLaunch.result)
+	if len(actions) < 2 {
+		t.Fatalf("expected at least two launch actions, got %d", len(actions))
+	}
+
+	// Up from the first action wraps to the last.
+	m.handleWorkflowLaunchKey(tea.KeyMsg{Type: tea.KeyUp})
+	if m.workflowLaunch.selected != len(actions)-1 {
+		t.Fatalf("expected up at first to wrap to last, got %d", m.workflowLaunch.selected)
+	}
+
+	// Down from the last action wraps back to the first.
+	m.handleWorkflowLaunchKey(tea.KeyMsg{Type: tea.KeyDown})
+	if m.workflowLaunch.selected != 0 {
+		t.Fatalf("expected down at last to wrap to first, got %d", m.workflowLaunch.selected)
+	}
+}

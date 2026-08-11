@@ -5,15 +5,21 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/BurntSushi/toml"
 	"github.com/usewhale/whale/internal/acp"
 	"github.com/usewhale/whale/internal/agent"
 	"github.com/usewhale/whale/internal/core"
+	"github.com/usewhale/whale/internal/defaults"
 	"github.com/usewhale/whale/internal/llm/deepseek"
+	whalemcp "github.com/usewhale/whale/internal/mcp"
 	"github.com/usewhale/whale/internal/policy"
 	"github.com/usewhale/whale/internal/store"
 	"github.com/usewhale/whale/internal/tools"
@@ -50,13 +56,51 @@ func main() {
 		}
 	}
 
+	modelName, err := modelFromEnv()
+	if err != nil {
+		acp.Logger.Fatalf("invalid model configuration: %v", err)
+	}
+	api, err := apiFromEnv()
+	if err != nil {
+		acp.Logger.Fatalf("invalid API configuration: %v", err)
+	}
+	compactThresh, err := compactThresholdFromEnv()
+	if err != nil {
+		acp.Logger.Fatalf("invalid compaction configuration: %v", err)
+	}
+	// The context window is a model property: derive it from the resolved model
+	// name (1M for both V4 models) so the compaction trigger and tail budget
+	// agree with the provider's real ceiling. WHALE_CONTEXT_WINDOW overrides.
+	contextWindow := defaults.ContextWindowForModel(modelName)
+	if override, err := contextWindowFromEnv(); err != nil {
+		acp.Logger.Fatalf("invalid context-window configuration: %v", err)
+	} else if override > 0 {
+		contextWindow = override
+	}
+	maxToolIters, err := maxToolItersFromEnv()
+	if err != nil {
+		acp.Logger.Fatalf("invalid tool-iteration configuration: %v", err)
+	}
+
+	// The ACP path historically hardcoded the retired "deepseek-chat" alias,
+	// which silently dropped the context window to 128K and routed to chat
+	// completions. Resolve the real model (WHALE_MODEL validated against the
+	// supported set, else defaults.DefaultModel) once, and use the same name
+	// for both the provider and the window so they can never disagree.
 	provider, err := deepseek.New(
 		deepseek.WithAPIKey(apiKey),
-		deepseek.WithModel("deepseek-chat"),
+		deepseek.WithModel(modelName),
+		deepseek.WithAPI(api),
 	)
 	if err != nil {
 		acp.Logger.Fatalf("failed to create provider: %v", err)
 	}
+	apiLabel := string(api)
+	if apiLabel == "" {
+		apiLabel = "auto"
+	}
+	acp.Logger.Printf("provider: model=%s api=%q context_window=%d compact_threshold=%.2f max_tool_iters=%d",
+		modelName, apiLabel, contextWindow, compactThresh, maxToolIters)
 
 	sessionsDir := os.Getenv("WHALE_SESSIONS_DIR")
 	if sessionsDir == "" {
@@ -74,7 +118,7 @@ func main() {
 	// session gets its own runtime so prompts in different sessions run
 	// concurrently and a prompt waiting on a permission dialog only blocks its
 	// own session, not every other one sharing the process.
-	newRuntime := func(acpSessionID, cwd string) (*acp.SessionRuntime, error) {
+	newRuntime := func(acpSessionID, cwd string, mcps []acp.MCPServer) (*acp.SessionRuntime, error) {
 		ts, err := tools.NewToolset(cwd)
 		if err != nil {
 			return nil, fmt.Errorf("create toolset: %w", err)
@@ -90,17 +134,32 @@ func main() {
 		ts.SetExecBoundaryPolicy(sessionPolicy)
 		sid := acpSessionID
 		ts.SetExecBoundaryApproval(func() string { return sid }, approvalFn)
-		toolList := ts.Tools()
+		mcpManager, reg := wireMCPServers(ts, dataDir, cwd, mcps)
+		// Auto-compaction must be wired explicitly and the threshold passed
+		// explicitly: the agent's own default is 0.90, while the CLI parity
+		// threshold is defaults.DefaultAutoCompactThreshold (0.85). Relying on
+		// the agent default would silently change the trigger point.
 		whaleAgent := agent.NewAgentWithRegistry(
 			provider,
 			msgStore,
-			core.NewToolRegistry(toolList),
-			agent.WithMaxToolIters(100),
+			reg,
+			agent.WithAutoCompact(true, compactThresh, contextWindow),
+			agent.WithMaxToolIters(maxToolIters),
 			agent.WithApprovalFunc(approvalFn),
 			agent.WithToolPolicy(sessionPolicy),
 		)
-		acp.Logger.Printf("session runtime ready: acp=%s cwd=%s tools=%d", acpSessionID, cwd, len(toolList))
-		return &acp.SessionRuntime{Agent: whaleAgent, Toolset: ts}, nil
+		acp.Logger.Printf("session runtime ready: acp=%s cwd=%s tools=%d", acpSessionID, cwd, len(reg.Tools()))
+		return &acp.SessionRuntime{
+			Agent:   whaleAgent,
+			Toolset: ts,
+			Close: func() {
+				if mcpManager != nil {
+					if err := mcpManager.Close(); err != nil {
+						acp.Logger.Printf("mcp close: %v", err)
+					}
+				}
+			},
+		}, nil
 	}
 
 	handler := acp.NewHandler(transport, msgStore, workspaceRoot)
@@ -109,7 +168,10 @@ func main() {
 
 	acp.Logger.Printf("ready, waiting for ACP messages on stdin")
 
-	if err := handler.Run(); err != nil {
+	err = handler.Run()
+	// Close MCP server sessions before exiting — os.Exit below skips defers.
+	handler.CloseSessions()
+	if err != nil {
 		if err == context.Canceled || err.Error() == "EOF" || err.Error() == "stdin read: EOF" {
 			acp.Logger.Printf("shutting down normally")
 			os.Exit(0)
@@ -117,6 +179,90 @@ func main() {
 		fmt.Fprintf(os.Stderr, "fatal: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// Env knobs for the ACP entrypoint. These are read once at process start
+// (changing them requires restarting Zed's agent process) and are ACP-only:
+// the CLI path reads the same values from config.toml.
+//
+// modelFromEnv returns the resolved model name: WHALE_MODEL validated against
+// the supported set, or defaults.DefaultModel. Mirrors the CLI's model
+// resolution and validation (internal/ui/cli/cmd/root.go).
+func modelFromEnv() (string, error) {
+	// Canonicalize to the lowercase slug: IsSupportedModel matches
+	// case-insensitively, but the same name feeds both the provider (sent to
+	// the API as-is) and the window/transport inference (responsesCapableModel
+	// is a case-sensitive prefix). A mixed-case value that validated fine
+	// would otherwise make window (1M) and transport (chat completions)
+	// disagree and would send a non-canonical slug to the provider — the exact
+	// "one name, two meanings" failure this fix deletes.
+	if v := strings.ToLower(strings.TrimSpace(os.Getenv("WHALE_MODEL"))); v != "" {
+		if !defaults.IsSupportedModel(v) {
+			return "", fmt.Errorf("unsupported model: %s", v)
+		}
+		return v, nil
+	}
+	return defaults.DefaultModel, nil
+}
+
+// apiFromEnv returns the explicit API transport selection from WHALE_API
+// (responses | chat_completions | auto). The zero value (auto) is the default
+// and, for the default model deepseek-v4-flash, resolves to the Responses
+// API.
+func apiFromEnv() (deepseek.API, error) {
+	return deepseek.NormalizeAPI(os.Getenv("WHALE_API"))
+}
+
+// compactThresholdFromEnv returns the compaction trigger threshold.
+// Unset yields defaults.DefaultAutoCompactThreshold (0.85) — CLI parity. The
+// value is passed explicitly to WithAutoCompact because the agent's own
+// default (defaults.DefaultAgentCompactThreshold, 0.90) would otherwise win.
+func compactThresholdFromEnv() (float64, error) {
+	v := strings.TrimSpace(os.Getenv("WHALE_COMPACT_THRESHOLD"))
+	if v == "" {
+		return defaults.DefaultAutoCompactThreshold, nil
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	// math.IsNaN is required: NaN satisfies neither f <= 0 nor f >= 1, so a
+	// bare range check would accept it, and WithAutoCompact's threshold guard
+	// (t > 0 && t < 1) would then silently keep the agent's 0.90 default —
+	// the exact trap this knob exists to avoid. +/-Inf are already rejected by
+	// the range check.
+	if err != nil || math.IsNaN(f) || f <= 0 || f >= 1 {
+		return 0, fmt.Errorf("invalid WHALE_COMPACT_THRESHOLD %q: must be a finite float in (0,1)", v)
+	}
+	return f, nil
+}
+
+// contextWindowFromEnv returns an explicit context-window override from
+// WHALE_CONTEXT_WINDOW, or 0 when unset (caller derives the window from the
+// model). A set value must be a positive integer.
+func contextWindowFromEnv() (int, error) {
+	v := strings.TrimSpace(os.Getenv("WHALE_CONTEXT_WINDOW"))
+	if v == "" {
+		return 0, nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return 0, fmt.Errorf("invalid WHALE_CONTEXT_WINDOW %q: must be a positive integer", v)
+	}
+	return n, nil
+}
+
+// maxToolItersFromEnv returns the ACP tool-iteration cap. Unset yields
+// defaults.DefaultMaxToolIters (300). A value below 1 is rejected rather than
+// treated as "unlimited": the dynamic loop guards cannot see mutating-
+// argument-varying loops, so the ACP path must always keep a finite backstop.
+func maxToolItersFromEnv() (int, error) {
+	v := strings.TrimSpace(os.Getenv("WHALE_MAX_TOOL_ITERS"))
+	if v == "" {
+		return defaults.DefaultMaxToolIters, nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 1 {
+		return 0, fmt.Errorf("invalid WHALE_MAX_TOOL_ITERS %q: must be a positive integer", v)
+	}
+	return n, nil
 }
 
 func loadAPIKeyFromCredentials(dataDir string) string {
@@ -175,12 +321,16 @@ func loadPermissionPolicy(dataDir, workspaceRoot string) policy.RulePolicy {
 	}
 
 	perm := merged.Permissions
-	defaultPerm := policy.PermissionAllow
+	// ACP is unattended and trusts its host, so anything not explicitly
+	// allowed (by the default rules or the user's config) must ask instead of
+	// silently running. Hosts that want the old permissive behavior can set
+	// default = "allow" in config.toml.
+	defaultPerm := policy.PermissionAsk
 	switch strings.ToLower(perm.Default) {
 	case "deny":
 		defaultPerm = policy.PermissionDeny
-	case "ask":
-		defaultPerm = policy.PermissionAsk
+	case "allow":
+		defaultPerm = policy.PermissionAllow
 	}
 
 	// Build user rules per category so a single malformed value only drops the
@@ -251,3 +401,215 @@ func mergePermissions(dst, src *permFile) {
 		}
 	}
 }
+
+// mcpConsentRefusedMarker is the standardized stderr token that
+// whale-ecosystem MCP servers emit when spawned without explicit consent
+// (see the --allow-spawn spec). whale-acp matches it to enrich logs and to
+// treat the failure as a deterministic refusal.
+const mcpConsentRefusedMarker = "MCP-CONSENT-REFUSED"
+
+// failedMCPServers is a per-process negative cache of servers that failed to
+// start, keyed by identity. Without it, a session-heavy host would re-spawn a
+// broken server (e.g. a consent-refusing codemap) on every session/new.
+var failedMCPServers sync.Map // key: mcpServerKey -> struct{}
+
+func mcpServerKey(name, command string, args []string) string {
+	return name + "\x00" + command + "\x00" + strings.Join(args, "\x00")
+}
+
+// isConsentRefused reports whether a server failure carries the standardized
+// "refused to start without explicit consent" marker (see the --allow-spawn
+// spec), matched anywhere in the joined error/stderr text. It only affects log
+// classification; the failure is negative-cached either way.
+func isConsentRefused(err string) bool {
+	return strings.Contains(err, mcpConsentRefusedMarker)
+}
+
+// wireMCPServers loads the session MCP config, connects the configured
+// servers, and configures the toolset's deferred MCP catalog so the agent can
+// discover and promote mcp__<server>__<tool> tools via tool_search. MCP tools
+// are deliberately NOT registered eagerly: the session schema carries only
+// tool_search (plus the <available-deferred-tools> block) until the model
+// selects specific tools — matching the main app and bench/deferred_compare.
+// Returns the manager (for shutdown) and the session tool registry (promoted
+// tools are added to it lazily). The registry is never nil.
+func wireMCPServers(ts *tools.Toolset, dataDir, cwd string, mcps []acp.MCPServer) (*whalemcp.Manager, *core.ToolRegistry) {
+	mcpCfg, err := mcpConfigForSession(dataDir, mcps)
+	if err != nil {
+		acp.Logger.Printf("mcp config: %v", err)
+		mcpCfg = whalemcp.Config{Servers: map[string]whalemcp.ServerConfig{}}
+	}
+	// Skip servers that failed to start in an earlier session of this process:
+	// don't re-spawn something known-broken on every session/new.
+	for _, name := range sortedKeys(mcpCfg.Servers) {
+		srv := mcpCfg.Servers[name]
+		if _, bad := failedMCPServers.Load(mcpServerKey(name, srv.Command, srv.Args)); bad {
+			delete(mcpCfg.Servers, name)
+			acp.Logger.Printf("mcp server %s: previously failed to start, skipping", sanitizeLogName(name))
+		}
+	}
+	var mcpManager *whalemcp.Manager
+	var reg *core.ToolRegistry
+	if len(mcpCfg.Servers) > 0 {
+		mcpManager = whalemcp.NewManager(mcpCfg, cwd)
+		mcpManager.Initialize(context.Background())
+		for _, st := range mcpManager.States() {
+			switch st.Status {
+			case whalemcp.StatusFailed, whalemcp.StatusCancelled:
+				if srv, ok := mcpCfg.Servers[st.Name]; ok {
+					failedMCPServers.Store(mcpServerKey(st.Name, srv.Command, srv.Args), struct{}{})
+				}
+				if isConsentRefused(st.Error) {
+					acp.Logger.Printf("mcp server %s: refused to start without explicit consent (%s)", sanitizeLogName(st.Name), sanitizeLogName(st.Error))
+				} else {
+					acp.Logger.Printf("mcp server %s: %s (%s)", sanitizeLogName(st.Name), st.Status, sanitizeLogName(st.Error))
+				}
+			default:
+				acp.Logger.Printf("mcp server %s: %s (%d tools)", sanitizeLogName(st.Name), st.Status, len(st.ToolNames))
+			}
+		}
+		if catalog := mcpManager.BuildDeferredCatalog(); catalog != nil && !catalog.Empty() {
+			ts.SetDeferredToolSearch(
+				&deferredCatalogAdapter{c: catalog},
+				func(names []string) ([]core.ToolSpec, error) {
+					built, err := mcpManager.BuildTools(names)
+					if err != nil {
+						return nil, err
+					}
+					if err := reg.AddTools(built); err != nil {
+						return nil, err
+					}
+					specs := make([]core.ToolSpec, len(built))
+					for i, t := range built {
+						specs[i] = core.DescribeTool(t)
+					}
+					return specs, nil
+				},
+				func() string { return whalemcp.RenderAvailableDeferredTools(catalog) },
+			)
+		}
+	}
+	// The registry must be built after SetDeferredToolSearch so tool_search is
+	// included in the schema when the deferred catalog is non-empty.
+	reg = core.NewToolRegistry(ts.Tools())
+	return mcpManager, reg
+}
+
+// mcpConfigForSession returns the MCP server config for a session: the local
+// ~/.whale/mcp.json baseline (or $WHALE_HOME/mcp.json) merged with the
+// servers the ACP client supplied on session/new / session/load.
+// Client-supplied servers win on name conflicts — the client is authoritative
+// for its own session.
+func mcpConfigForSession(dataDir string, mcps []acp.MCPServer) (whalemcp.Config, error) {
+	cfg, err := whalemcp.LoadConfig(whalemcp.DefaultConfigPath(dataDir))
+	if err != nil {
+		return cfg, err
+	}
+	if len(mcps) > 0 {
+		// Client-supplied servers are arbitrary stdio processes spawned with
+		// the whale-acp user's privileges. That is the ACP trust model (the
+		// host is fully trusted), but make it visible in the log.
+		acp.Logger.Printf("connecting %d MCP server(s) supplied by the ACP client", len(mcps))
+	}
+	for _, name := range sortedKeys(cfg.Servers) {
+		if srv := cfg.Servers[name]; strings.TrimSpace(srv.URL) != "" {
+			// The local baseline is passed through unchanged (matching the main
+			// app), but http transport is outside the stdio-only advertisement.
+			acp.Logger.Printf("baseline mcp server %s uses url transport (%s); whale-acp advertises stdio only", sanitizeLogName(name), sanitizeLogName(srv.URL))
+		}
+	}
+	for _, m := range mcps {
+		name := strings.TrimSpace(m.Name)
+		if name == "" {
+			continue
+		}
+		if kind := clientMCPServerTransport(m); kind != "stdio" {
+			// We advertise mcpCapabilities {http:false, sse:false} — stdio only.
+			acp.Logger.Printf("mcp server %s: unsupported transport %q (stdio only), skipping", sanitizeLogName(name), kind)
+			continue
+		}
+		cfg.Servers[name] = whalemcp.ServerConfig{
+			Name:    name,
+			Type:    strings.TrimSpace(m.Type),
+			Command: m.Command,
+			Args:    m.Args,
+			Env:     envVariableMap(m.Env),
+			URL:     m.URL,
+		}
+	}
+	return cfg, nil
+}
+
+// envVariableMap converts ACP's env array ({name,value} objects) into the map
+// form the whale MCP manager expects.
+func envVariableMap(envs []acp.EnvVariable) map[string]string {
+	if len(envs) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(envs))
+	for _, e := range envs {
+		if strings.TrimSpace(e.Name) != "" {
+			out[e.Name] = e.Value
+		}
+	}
+	return out
+}
+
+// sanitizeLogName strips control characters (log-injection defense) before a
+// value is written to the log: newline/CR/tab and the rest of the C0 controls
+// plus DEL are replaced with spaces so a client-supplied server name or error
+// cannot forge log lines or inject terminal sequences.
+func sanitizeLogName(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r < ' ' || r == 0x7f {
+			return ' '
+		}
+		return r
+	}, s)
+}
+
+// sortedKeys returns the sorted keys of a string-keyed map, for deterministic
+// iteration order in logs.
+func sortedKeys[V any](m map[string]V) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// clientMCPServerTransport returns the transport kind of a client-supplied
+// MCP server. whale-acp advertises mcpCapabilities {http:false, sse:false},
+// so only stdio servers (command + args + env) are accepted.
+func clientMCPServerTransport(m acp.MCPServer) string {
+	switch strings.ToLower(strings.TrimSpace(m.Type)) {
+	case "http", "streamable-http", "streamable_http", "streamablehttp":
+		return "http"
+	case "sse":
+		return "sse"
+	}
+	if strings.TrimSpace(m.URL) != "" {
+		return "http"
+	}
+	return "stdio"
+}
+
+// deferredCatalogAdapter adapts mcp.DeferredToolCatalog to the tools package's
+// DeferredToolCatalog interface consumed by tool_search.
+type deferredCatalogAdapter struct {
+	c *whalemcp.DeferredToolCatalog
+}
+
+func (a *deferredCatalogAdapter) Empty() bool { return a.c.Empty() }
+
+func (a *deferredCatalogAdapter) Search(query string) []tools.DeferredToolEntry {
+	results := a.c.Search(query)
+	out := make([]tools.DeferredToolEntry, len(results))
+	for i, r := range results {
+		out[i] = tools.DeferredToolEntry{Name: r.Name, Server: r.Server, Description: r.Description}
+	}
+	return out
+}
+
+func (a *deferredCatalogAdapter) Names() []string { return a.c.Names() }

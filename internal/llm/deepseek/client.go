@@ -39,6 +39,7 @@ type Client struct {
 	model                   string
 	reasoningEffort         string
 	thinkingEnabled         bool
+	chatCompletionsThinking *ChatCompletionsThinkingConfig
 	maxTokens               int
 	retryPolicy             llmretry.Policy
 	retrySleeper            llmretry.Sleeper
@@ -46,6 +47,9 @@ type Client struct {
 	streamIdleTimeout       time.Duration
 	prefixCompletionEnabled bool
 	multimodal              MultimodalConfig
+	webSearchMode           WebSearchMode
+	api                     API
+	searchCalls             *webSearchCallRegistry
 }
 
 type Option func(*Client)
@@ -57,6 +61,12 @@ type MultimodalConfig struct {
 	APIKey    string
 	APIKeyEnv string
 	Model     string
+}
+
+type ChatCompletionsThinkingConfig struct {
+	EnabledType    string
+	Omit           bool
+	ReasoningSplit bool
 }
 
 func WithBaseURL(v string) Option {
@@ -83,6 +93,13 @@ func WithThinking(enabled bool) Option {
 	return func(c *Client) { c.thinkingEnabled = enabled }
 }
 
+func WithChatCompletionsThinking(cfg ChatCompletionsThinkingConfig) Option {
+	return func(c *Client) {
+		cfg.EnabledType = strings.ToLower(strings.TrimSpace(cfg.EnabledType))
+		c.chatCompletionsThinking = &cfg
+	}
+}
+
 func WithMaxTokens(v int) Option {
 	return func(c *Client) { c.maxTokens = v }
 }
@@ -99,6 +116,34 @@ func WithMultimodal(cfg MultimodalConfig) Option {
 		cfg.APIKeyEnv = strings.TrimSpace(cfg.APIKeyEnv)
 		cfg.Model = strings.TrimSpace(cfg.Model)
 		c.multimodal = cfg
+	}
+}
+
+// WithWebSearchMode selects where web search runs: local (default, chat
+// completions plus Whale's own web_search tool), server (Responses API with
+// DeepSeek's built-in web_search), or auto (Responses API when the model
+// supports it).
+func WithWebSearchMode(mode WebSearchMode) Option {
+	return func(c *Client) {
+		if strings.TrimSpace(string(mode)) != "" {
+			c.webSearchMode = mode
+		}
+	}
+}
+
+// WithAPI selects which DeepSeek endpoint the client speaks: the Responses
+// API or chat completions. The zero value (APIAuto) keeps the model-name
+// heuristic; an explicit selection is the transport authority and wins over
+// any inference (see responsesEnabled).
+func WithAPI(api API) Option {
+	return func(c *Client) {
+		// Normalize like WithReasoningEffort: a caller passing " RESPONSES "
+		// must not silently miss responsesEnabled's exact-match switch and
+		// fall back to the model heuristic.
+		v := strings.ToLower(strings.TrimSpace(string(api)))
+		if v != "" {
+			c.api = API(v)
+		}
 	}
 }
 
@@ -143,6 +188,7 @@ func New(opts ...Option) (*Client, error) {
 		retrySleeper:      llmretry.Sleep,
 		streamMaxAttempts: defaultStreamMaxAttempts,
 		streamIdleTimeout: defaultStreamIdleTimeout,
+		searchCalls:       &webSearchCallRegistry{},
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -203,6 +249,9 @@ func (c *Client) stream(ctx context.Context, history []core.Message, tools []cor
 	if latestUserMessageHasAttachments(history) {
 		return c.streamMultimodal(ctx, history, tools, out)
 	}
+	if c.responsesEnabled() {
+		return c.streamResponses(ctx, history, tools, out)
+	}
 	msgs, sanitizeDiag := sanitizeDeepSeekMessagesForRequest(toDeepSeekMessages(history), c.thinkingEnabled)
 	replayDiag := toolResultReplayDiagnostics(history, msgs)
 	payload := map[string]any{
@@ -210,14 +259,8 @@ func (c *Client) stream(ctx context.Context, history []core.Message, tools []cor
 		"stream":         true,
 		"stream_options": map[string]any{"include_usage": true},
 		"messages":       msgs,
-		"thinking":       map[string]any{"type": "disabled"},
 	}
-	if c.thinkingEnabled {
-		payload["thinking"] = map[string]any{"type": "enabled"}
-		if strings.TrimSpace(c.reasoningEffort) != "" {
-			payload["reasoning_effort"] = c.reasoningEffort
-		}
-	}
+	c.applyChatCompletionsThinking(payload, true)
 	if len(tools) > 0 {
 		payload["tools"] = toDeepSeekTools(tools)
 	}
@@ -238,6 +281,12 @@ func (c *Client) streamPrefix(ctx context.Context, history []core.Message, prefi
 	// prefixCompletionEnabled auto-flag: callers that pass a prefix are opting in
 	// directly (e.g. plan-finalization recovery). The flag only governs implicit
 	// use. Endpoint incompatibility still falls back via prefixCompletionBaseURL.
+	if c.responsesEnabled() {
+		// The Responses API has no prefix-completion endpoint; degrade to a
+		// plain stream (tools are dropped the same way the attachments path
+		// drops them).
+		return c.stream(ctx, history, nil, out)
+	}
 	if latestUserMessageHasAttachments(history) || strings.TrimSpace(prefix) == "" {
 		return c.stream(ctx, history, nil, out)
 	}
@@ -257,14 +306,8 @@ func (c *Client) streamPrefix(ctx context.Context, history []core.Message, prefi
 		"stream":         true,
 		"stream_options": map[string]any{"include_usage": true},
 		"messages":       msgs,
-		"thinking":       map[string]any{"type": "disabled"},
 	}
-	if c.thinkingEnabled {
-		payload["thinking"] = map[string]any{"type": "enabled"}
-		if strings.TrimSpace(c.reasoningEffort) != "" {
-			payload["reasoning_effort"] = c.reasoningEffort
-		}
-	}
+	c.applyChatCompletionsThinking(payload, true)
 	if len(stop) > 0 {
 		payload["stop"] = append([]string(nil), stop...)
 	}
@@ -314,6 +357,37 @@ func (c *Client) streamPrefix(ctx context.Context, history []core.Message, prefi
 		}
 	}
 	return <-done
+}
+
+func (c *Client) applyChatCompletionsThinking(payload map[string]any, includeDefault bool) {
+	cfg := c.chatCompletionsThinking
+	if cfg == nil {
+		if !includeDefault {
+			return
+		}
+		thinkingType := "disabled"
+		if c.thinkingEnabled {
+			thinkingType = "enabled"
+			if strings.TrimSpace(c.reasoningEffort) != "" {
+				payload["reasoning_effort"] = c.reasoningEffort
+			}
+		}
+		payload["thinking"] = map[string]any{"type": thinkingType}
+		return
+	}
+	if !cfg.Omit {
+		thinkingType := "disabled"
+		if c.thinkingEnabled {
+			thinkingType = cfg.EnabledType
+			if thinkingType == "" {
+				thinkingType = "enabled"
+			}
+		}
+		payload["thinking"] = map[string]any{"type": thinkingType}
+	}
+	if cfg.ReasoningSplit {
+		payload["reasoning_split"] = true
+	}
 }
 
 func (c *Client) prefixCompletionBaseURL() (string, bool) {
@@ -386,11 +460,15 @@ func (c *Client) sendStreamRequest(ctx context.Context, requestBaseURL string, b
 }
 
 func (c *Client) sendStreamRequestWithKey(ctx context.Context, requestBaseURL, apiKey string, body []byte) (*http.Response, error) {
+	return c.sendStreamRequestWithKeyPath(ctx, requestBaseURL, apiKey, body, "/chat/completions")
+}
+
+func (c *Client) sendStreamRequestWithKeyPath(ctx context.Context, requestBaseURL, apiKey string, body []byte, path string) (*http.Response, error) {
 	requestBaseURL = strings.TrimRight(strings.TrimSpace(requestBaseURL), "/")
 	if requestBaseURL == "" {
 		requestBaseURL = c.baseURL
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, requestBaseURL+"/chat/completions", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, requestBaseURL+path, bytes.NewReader(body))
 	if err != nil {
 		return nil, &requestBuildError{err: fmt.Errorf("new request: %w", err)}
 	}
@@ -491,6 +569,10 @@ func shouldRetryStreamError(err error) bool {
 	}
 	var progressErr *streamProgressError
 	if errors.As(err, &progressErr) {
+		return false
+	}
+	var responsesErr *responsesTerminalError
+	if errors.As(err, &responsesErr) {
 		return false
 	}
 	if errors.As(err, &terminalErr) {

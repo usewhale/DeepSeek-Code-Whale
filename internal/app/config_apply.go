@@ -2,13 +2,17 @@ package app
 
 import (
 	"fmt"
+	"log"
+	"os"
+	"strings"
+	"time"
+
 	"github.com/usewhale/whale/internal/core"
+	"github.com/usewhale/whale/internal/llm/deepseek"
 	"github.com/usewhale/whale/internal/plugins"
 	"github.com/usewhale/whale/internal/policy"
 	"github.com/usewhale/whale/internal/store"
 	"github.com/usewhale/whale/internal/tools"
-	"strings"
-	"time"
 )
 
 func ApplyLoadedConfig(cfg *Config, loaded LoadedConfig) error {
@@ -72,6 +76,20 @@ func ApplyFileConfig(cfg *Config, file FileConfig) error {
 		return err
 	}
 	applyMiniMaxProviderConfig(cfg, file.Providers.MiniMax)
+	if strings.TrimSpace(file.Providers.DeepSeek.WebSearch) != "" {
+		mode, err := deepseek.NormalizeWebSearchMode(file.Providers.DeepSeek.WebSearch)
+		if err != nil {
+			return err
+		}
+		cfg.DeepSeekWebSearch = mode
+	}
+	if strings.TrimSpace(file.Providers.DeepSeek.API) != "" {
+		api, err := deepseek.NormalizeAPI(file.Providers.DeepSeek.API)
+		if err != nil {
+			return err
+		}
+		cfg.DeepSeekAPI = api
+	}
 	if file.Retry.MaxAttempts != nil {
 		if *file.Retry.MaxAttempts < 0 {
 			return fmt.Errorf("invalid retry.max_attempts: must be 0 or greater")
@@ -192,6 +210,27 @@ func LoadAndApplyConfig(cfg Config, workspaceRoot string) (Config, error) {
 		return Config{}, err
 	}
 	overlayExplicitConfig(&base, cfg)
+
+	// WHALE_API env overrides the config file value: env wins over config,
+	// mirroring the DEEPSEEK_BASE_URL precedent. Applied after all file layers
+	// so a project config cannot silently re-assert a different transport.
+	if v := strings.TrimSpace(os.Getenv("WHALE_API")); v != "" {
+		api, err := deepseek.NormalizeAPI(v)
+		if err != nil {
+			return Config{}, fmt.Errorf("WHALE_API: %w", err)
+		}
+		base.DeepSeekAPI = api
+	}
+	// The API knob is the transport authority; web_search = "server" is at
+	// best an inference that the Responses API is in use. Resolve any
+	// conflict deterministically: degrade, never refuse to start.
+	resolvedAPI, resolvedSearch, warn := deepseek.ResolveTransport(base.DeepSeekAPI, base.DeepSeekWebSearch)
+	base.DeepSeekAPI = resolvedAPI
+	base.DeepSeekWebSearch = resolvedSearch
+	if warn != "" {
+		log.Printf("whale: %s", warn)
+	}
+
 	if err := validateShellRuntimeConfig(base); err != nil {
 		return Config{}, err
 	}
@@ -272,6 +311,12 @@ func overlayExplicitConfig(dst *Config, src Config) {
 	}
 	if src.MiniMax != def.MiniMax {
 		dst.MiniMax = normalizeMiniMaxProviderConfig(src.MiniMax)
+	}
+	if src.DeepSeekWebSearch != def.DeepSeekWebSearch {
+		dst.DeepSeekWebSearch = src.DeepSeekWebSearch
+	}
+	if src.DeepSeekAPI != def.DeepSeekAPI {
+		dst.DeepSeekAPI = src.DeepSeekAPI
 	}
 	if src.ShellForegroundWaitDefaultMS != 0 && src.ShellForegroundWaitDefaultMS != def.ShellForegroundWaitDefaultMS {
 		dst.ShellForegroundWaitDefaultMS = src.ShellForegroundWaitDefaultMS

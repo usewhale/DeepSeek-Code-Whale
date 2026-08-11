@@ -97,13 +97,9 @@ func (m *model) handleReviewTargetPickerKey(msg tea.KeyMsg) tea.Cmd {
 			return nil
 		}
 	case "up", "k":
-		if m.reviewTargetPicker.selected > 0 {
-			m.reviewTargetPicker.selected--
-		}
+		m.reviewTargetPicker.selected = wrapSelection(m.reviewTargetPicker.selected, m.reviewTargetPickerChoiceCount(), -1)
 	case "down", "j":
-		if m.reviewTargetPicker.selected < m.reviewTargetPickerChoiceCount()-1 {
-			m.reviewTargetPicker.selected++
-		}
+		m.reviewTargetPicker.selected = wrapSelection(m.reviewTargetPicker.selected, m.reviewTargetPickerChoiceCount(), 1)
 	case "enter":
 		return m.submitSelectedReviewTarget()
 	case "/":

@@ -9,13 +9,16 @@ import (
 	"github.com/usewhale/whale/internal/core"
 	"github.com/usewhale/whale/internal/llm"
 	"github.com/usewhale/whale/internal/llm/deepseek"
+	llmretry "github.com/usewhale/whale/internal/llm/retry"
 )
 
 const webFetchExtractorModel = "deepseek-v4-flash"
 
 type webFetchExtractorOptions struct {
-	APIKey  string
-	BaseURL string
+	APIKey      string
+	BaseURL     string
+	API         deepseek.API
+	RetryPolicy llmretry.Policy
 }
 
 type deepSeekWebFetchExtractor struct {
@@ -36,6 +39,14 @@ func (e *deepSeekWebFetchExtractor) Extract(ctx context.Context, prompt, content
 	}
 	if strings.TrimSpace(e.opts.BaseURL) != "" {
 		dsOpts = append(dsOpts, deepseek.WithBaseURL(e.opts.BaseURL))
+	}
+	// Honor the user's explicit transport selection: the extractor pins its own
+	// model/thinking/tokens, but the API (responses vs chat_completions) is a
+	// config property — a chat-completions-only endpoint must not be sent
+	// /responses requests behind the user's back.
+	dsOpts = append(dsOpts, deepseek.WithAPI(e.opts.API))
+	if hasRetryPolicy(e.opts.RetryPolicy) {
+		dsOpts = append(dsOpts, deepseek.WithRetryPolicy(e.opts.RetryPolicy))
 	}
 	provider, err := deepseek.New(dsOpts...)
 	if err != nil {

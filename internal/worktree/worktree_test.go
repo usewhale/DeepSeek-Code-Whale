@@ -631,6 +631,39 @@ func TestStatusReportsMissingWorktree(t *testing.T) {
 	}
 }
 
+func TestResolveSessionComputesSessionWithoutSideEffects(t *testing.T) {
+	repo := newGitRepo(t)
+	before := read(t, filepath.Join(repo, ".git", "info", "exclude"))
+	wtRoot := filepath.Join(repo, ".whale", "worktrees")
+	if _, err := os.Stat(wtRoot); !os.IsNotExist(err) {
+		t.Fatalf("worktrees dir should not exist before ResolveSession: %v", err)
+	}
+
+	sess, err := ResolveSession(repo, "feature/test")
+	if err != nil {
+		t.Fatalf("ResolveSession: %v", err)
+	}
+	if sess.Created {
+		t.Fatal("ResolveSession must not mark the session as created")
+	}
+	wantPath := filepath.Join(repo, ".whale", "worktrees", "feature+test")
+	if sess.Path != wantPath || sess.Branch != "worktree-feature+test" {
+		t.Fatalf("unexpected session: %+v", sess)
+	}
+	if sess.OriginalWorkspace != repo || sess.OriginalBranch != "main" || sess.OriginalHeadCommit == "" {
+		t.Fatalf("unexpected original metadata: %+v", sess)
+	}
+	if got := read(t, filepath.Join(repo, ".git", "info", "exclude")); got != before {
+		t.Fatalf("ResolveSession must not touch git info/exclude:\nbefore: %q\nafter:  %q", before, got)
+	}
+	if _, err := os.Stat(wtRoot); !os.IsNotExist(err) {
+		t.Fatalf("ResolveSession must not create the worktrees dir: %v", err)
+	}
+	if _, err := os.Stat(wantPath); !os.IsNotExist(err) {
+		t.Fatalf("ResolveSession must not create the worktree: %v", err)
+	}
+}
+
 func newGitRepo(t *testing.T) string {
 	t.Helper()
 	if _, err := exec.LookPath("git"); err != nil {
@@ -640,6 +673,11 @@ func newGitRepo(t *testing.T) string {
 	run(t, dir, "git", "init", "-b", "main")
 	run(t, dir, "git", "config", "user.email", "test@example.com")
 	run(t, dir, "git", "config", "user.name", "Test User")
+	// Keep test repos hermetic: disable commit/tag signing so these tests do
+	// not depend on the developer's gpg setup (commit.gpgsign / tag.gpgsign),
+	// which otherwise blocks headless runs waiting for a passphrase.
+	run(t, dir, "git", "config", "commit.gpgsign", "false")
+	run(t, dir, "git", "config", "tag.gpgsign", "false")
 	write(t, filepath.Join(dir, "README.md"), []byte("test\n"))
 	run(t, dir, "git", "add", "README.md")
 	run(t, dir, "git", "commit", "-m", "initial")

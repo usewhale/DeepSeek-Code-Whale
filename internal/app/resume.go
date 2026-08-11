@@ -50,9 +50,13 @@ func CheckResumeWorkspace(sessionsDir, sessionID, currentWorkspace string) (stri
 	return crossWorkspaceResumeMessage(workspace, sessionID), true, nil
 }
 
-func ResolveResumeWorktree(cfg Config, start StartOptions, currentWorkspace string) (WorktreeSession, error) {
-	if start.ResumeMenu {
-		return WorktreeSession{}, nil
+func ResolveResumeWorktree(cfg Config, start StartOptions, currentWorkspace string) (ResumeWorktreeDecision, error) {
+	decision, err := ResolveResumeWorktreeDecision(cfg, start, currentWorkspace)
+	if err != nil {
+		return ResumeWorktreeDecision{}, err
+	}
+	if !decision.MissingWorktree {
+		return decision, nil
 	}
 	sessionID := strings.TrimSpace(start.SessionID)
 	if sessionID == "" {
@@ -60,49 +64,50 @@ func ResolveResumeWorktree(cfg Config, start StartOptions, currentWorkspace stri
 		var err error
 		sessionID, err = resolveInitialSessionID(sessionsDir)
 		if err != nil {
-			return WorktreeSession{}, fmt.Errorf("resolve session failed: %w", err)
+			return ResumeWorktreeDecision{}, fmt.Errorf("resolve session failed: %w", err)
+		}
+	}
+	if err := CommitMissingWorktreeCleanup(store.DefaultSessionsDir(cfg.DataDir), sessionID, currentWorkspace); err != nil {
+		return ResumeWorktreeDecision{}, err
+	}
+	return ResumeWorktreeDecision{}, nil
+}
+
+type ResumeWorktreeDecision struct {
+	Session         WorktreeSession
+	MissingWorktree bool
+	TargetWorkspace string
+}
+
+func ResolveResumeWorktreeDecision(cfg Config, start StartOptions, currentWorkspace string) (ResumeWorktreeDecision, error) {
+	if start.ResumeMenu {
+		return ResumeWorktreeDecision{}, nil
+	}
+	sessionID := strings.TrimSpace(start.SessionID)
+	if sessionID == "" {
+		sessionsDir := store.DefaultSessionsDir(cfg.DataDir)
+		var err error
+		sessionID, err = resolveInitialSessionID(sessionsDir)
+		if err != nil {
+			return ResumeWorktreeDecision{}, fmt.Errorf("resolve session failed: %w", err)
 		}
 	}
 	sessionsDir := store.DefaultSessionsDir(cfg.DataDir)
 	meta, err := session.LoadSessionMeta(sessionsDir, sessionID)
 	if err != nil {
-		return WorktreeSession{}, err
+		return ResumeWorktreeDecision{}, err
 	}
 	if strings.TrimSpace(meta.WorktreePath) == "" {
-		return WorktreeSession{}, nil
+		return ResumeWorktreeDecision{}, nil
 	}
 	path := strings.TrimSpace(meta.WorktreePath)
 	if _, err := os.Stat(path); err != nil {
 		if os.IsNotExist(err) {
-			workspace := core.FirstNonEmpty(strings.TrimSpace(meta.OriginalWorkspace), currentWorkspace)
-			branch := strings.TrimSpace(meta.OriginalBranch)
-			if _, updateErr := session.UpdateSessionMeta(sessionsDir, sessionID, func(meta *session.SessionMeta) {
-				if workspace != "" {
-					meta.Workspace = workspace
-				}
-				if branch != "" {
-					meta.Branch = branch
-				}
-				clearSessionMetaWorktree(meta)
-			}); updateErr != nil {
-				return WorktreeSession{}, fmt.Errorf("record missing worktree exit: %w", updateErr)
-			}
-			return WorktreeSession{}, nil
+			return ResumeWorktreeDecision{MissingWorktree: true}, nil
 		}
-		return WorktreeSession{}, fmt.Errorf("stat worktree: %w", err)
+		return ResumeWorktreeDecision{}, fmt.Errorf("stat worktree: %w", err)
 	}
-	if !sameWorkspace(path, currentWorkspace) {
-		return WorktreeSession{
-			Name:               meta.WorktreeName,
-			Workspace:          meta.Workspace,
-			Path:               path,
-			Branch:             meta.WorktreeBranch,
-			OriginalWorkspace:  meta.OriginalWorkspace,
-			OriginalBranch:     meta.OriginalBranch,
-			OriginalHeadCommit: meta.OriginalHeadCommit,
-		}, nil
-	}
-	return WorktreeSession{
+	decision := ResumeWorktreeDecision{Session: WorktreeSession{
 		Name:               meta.WorktreeName,
 		Workspace:          meta.Workspace,
 		Path:               path,
@@ -110,7 +115,30 @@ func ResolveResumeWorktree(cfg Config, start StartOptions, currentWorkspace stri
 		OriginalWorkspace:  meta.OriginalWorkspace,
 		OriginalBranch:     meta.OriginalBranch,
 		OriginalHeadCommit: meta.OriginalHeadCommit,
-	}, nil
+	}}
+	decision.TargetWorkspace = resumeTargetWorkspace(decision.Session)
+	return decision, nil
+}
+
+func CommitMissingWorktreeCleanup(sessionsDir, sessionID, currentWorkspace string) error {
+	meta, err := session.LoadSessionMeta(sessionsDir, sessionID)
+	if err != nil {
+		return err
+	}
+	workspace := core.FirstNonEmpty(strings.TrimSpace(meta.OriginalWorkspace), currentWorkspace)
+	branch := strings.TrimSpace(meta.OriginalBranch)
+	if _, err := session.UpdateSessionMeta(sessionsDir, sessionID, func(meta *session.SessionMeta) {
+		if workspace != "" {
+			meta.Workspace = workspace
+		}
+		if branch != "" {
+			meta.Branch = branch
+		}
+		clearSessionMetaWorktree(meta)
+	}); err != nil {
+		return fmt.Errorf("record missing worktree exit: %w", err)
+	}
+	return nil
 }
 
 func crossWorkspaceResumeMessage(workspace, sessionID string) string {
@@ -330,7 +358,7 @@ func (a *App) ApplyResumeChoice(choice string) (ResumeApplyResult, error) {
 	} else if blocked {
 		return ResumeApplyResult{Message: msg}, nil
 	}
-	a.sessionID = next
+	a.setSessionID(next)
 	modeState, err := session.LoadModeState(a.sessionsDir, a.sessionID)
 	if err != nil {
 		return ResumeApplyResult{}, err

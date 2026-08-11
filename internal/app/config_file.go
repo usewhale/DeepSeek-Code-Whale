@@ -77,6 +77,8 @@ type FileProvidersConfig struct {
 
 type FileDeepSeekProviderConfig struct {
 	Multimodal FileMultimodalProviderConfig `toml:"multimodal,omitempty"`
+	WebSearch  string                       `toml:"web_search,omitempty"`
+	API        string                       `toml:"api,omitempty"`
 }
 
 type FileMiniMaxProviderConfig struct {

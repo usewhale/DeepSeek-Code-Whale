@@ -79,7 +79,7 @@ func TestStreamResponseParsesToolCallAndContent(t *testing.T) {
 	defer srv.Close()
 
 	_ = os.Setenv("DEEPSEEK_API_KEY", "test-key")
-	c, err := New(WithBaseURL(srv.URL), WithHTTPClient(srv.Client()))
+	c, err := New(WithWebSearchMode(WebSearchModeLocal), WithBaseURL(srv.URL), WithHTTPClient(srv.Client()))
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
@@ -127,7 +127,7 @@ func TestStreamResponseErrorsAfterPartialToolCallWithoutComplete(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c, err := New(WithAPIKey("test-key"), WithBaseURL(srv.URL), WithHTTPClient(srv.Client()))
+	c, err := New(WithWebSearchMode(WebSearchModeLocal), WithAPIKey("test-key"), WithBaseURL(srv.URL), WithHTTPClient(srv.Client()))
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
@@ -171,7 +171,7 @@ func TestStreamResponseParsesReasoningDelta(t *testing.T) {
 	defer srv.Close()
 
 	_ = os.Setenv("DEEPSEEK_API_KEY", "test-key")
-	c, err := New(WithBaseURL(srv.URL), WithHTTPClient(srv.Client()))
+	c, err := New(WithWebSearchMode(WebSearchModeLocal), WithBaseURL(srv.URL), WithHTTPClient(srv.Client()))
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
@@ -219,6 +219,7 @@ func TestStreamResponseRetriesRateLimitBeforeSSE(t *testing.T) {
 	policy.MaxAttempts = 2
 	policy.Jitter = 0
 	c, err := New(
+		WithWebSearchMode(WebSearchModeLocal),
 		WithAPIKey("test-key"),
 		WithBaseURL(srv.URL),
 		WithHTTPClient(srv.Client()),
@@ -274,6 +275,7 @@ func TestStreamResponseDoesNotRetryDisconnectedSSEAfterProgress(t *testing.T) {
 	policy := llmretry.DefaultPolicy()
 	policy.Jitter = 0
 	c, err := New(
+		WithWebSearchMode(WebSearchModeLocal),
 		WithAPIKey("test-key"),
 		WithBaseURL(srv.URL),
 		WithHTTPClient(srv.Client()),
@@ -330,6 +332,7 @@ func TestStreamResponseExhaustsDisconnectedSSEBeforeProgress(t *testing.T) {
 	policy := llmretry.DefaultPolicy()
 	policy.Jitter = 0
 	c, err := New(
+		WithWebSearchMode(WebSearchModeLocal),
 		WithAPIKey("test-key"),
 		WithBaseURL(srv.URL),
 		WithHTTPClient(srv.Client()),
@@ -382,6 +385,7 @@ func TestStreamResponseRetriesIdleSSEBeforeProgress(t *testing.T) {
 	policy := llmretry.DefaultPolicy()
 	policy.Jitter = 0
 	c, err := New(
+		WithWebSearchMode(WebSearchModeLocal),
 		WithAPIKey("test-key"),
 		WithBaseURL(srv.URL),
 		WithHTTPClient(srv.Client()),
@@ -450,6 +454,7 @@ func TestStreamResponseKeepalivesDoNotResetIdleTimeout(t *testing.T) {
 	policy := llmretry.DefaultPolicy()
 	policy.Jitter = 0
 	c, err := New(
+		WithWebSearchMode(WebSearchModeLocal),
 		WithAPIKey("test-key"),
 		WithBaseURL(srv.URL),
 		WithHTTPClient(srv.Client()),
@@ -501,6 +506,7 @@ func TestStreamResponseDoesNotRetryIdleSSEAfterReasoning(t *testing.T) {
 	defer srv.Close()
 
 	c, err := New(
+		WithWebSearchMode(WebSearchModeLocal),
 		WithAPIKey("test-key"),
 		WithBaseURL(srv.URL),
 		WithHTTPClient(srv.Client()),
@@ -562,6 +568,7 @@ func TestStreamResponseRetriesReasoningOnlyThenExhausts(t *testing.T) {
 	policy := llmretry.DefaultPolicy()
 	policy.Jitter = 0
 	c, err := New(
+		WithWebSearchMode(WebSearchModeLocal),
 		WithAPIKey("test-key"),
 		WithBaseURL(srv.URL),
 		WithHTTPClient(srv.Client()),
@@ -620,6 +627,7 @@ func TestStreamResponseRetriesReasoningOnlyThenRecovers(t *testing.T) {
 	policy := llmretry.DefaultPolicy()
 	policy.Jitter = 0
 	c, err := New(
+		WithWebSearchMode(WebSearchModeLocal),
 		WithAPIKey("test-key"),
 		WithBaseURL(srv.URL),
 		WithHTTPClient(srv.Client()),
@@ -680,6 +688,7 @@ func TestStreamResponseDoesNotRetryMalformedSSEFrame(t *testing.T) {
 	policy := llmretry.DefaultPolicy()
 	policy.MaxAttempts = 3
 	c, err := New(
+		WithWebSearchMode(WebSearchModeLocal),
 		WithAPIKey("test-key"),
 		WithBaseURL(srv.URL),
 		WithHTTPClient(srv.Client()),
@@ -707,6 +716,7 @@ func TestStreamResponseDoesNotRetryInvalidRequestURL(t *testing.T) {
 	policy := llmretry.DefaultPolicy()
 	policy.MaxAttempts = 3
 	c, err := New(
+		WithWebSearchMode(WebSearchModeLocal),
 		WithAPIKey("test-key"),
 		WithBaseURL("://bad-url"),
 		WithRetryPolicy(policy),
@@ -739,7 +749,7 @@ func TestStreamResponseDoesNotRetryInvalidRequestURL(t *testing.T) {
 func TestWithBaseURLOverridesEnvironment(t *testing.T) {
 	t.Setenv("DEEPSEEK_API_KEY", "test-key")
 	t.Setenv("DEEPSEEK_BASE_URL", "https://env.example")
-	c, err := New(WithBaseURL("https://config.example/"))
+	c, err := New(WithWebSearchMode(WebSearchModeLocal), WithBaseURL("https://config.example/"))
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
@@ -767,7 +777,7 @@ func TestStreamResponseWithPrefixUsesBetaPayload(t *testing.T) {
 	defer srv.Close()
 
 	t.Setenv("DEEPSEEK_API_KEY", "test-key")
-	c, err := New(WithBaseURL(srv.URL+"/beta"), WithHTTPClient(srv.Client()), WithPrefixCompletion(true))
+	c, err := New(WithWebSearchMode(WebSearchModeLocal), WithBaseURL(srv.URL+"/beta"), WithHTTPClient(srv.Client()), WithPrefixCompletion(true))
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
@@ -801,7 +811,7 @@ func TestStreamResponseWithPrefixUsesBetaPayload(t *testing.T) {
 
 func TestStreamResponseWithPrefixMapsDocumentedV1BaseToBeta(t *testing.T) {
 	t.Setenv("DEEPSEEK_API_KEY", "test-key")
-	c, err := New(WithBaseURL(defaultBaseURL+"/v1"), WithPrefixCompletion(true))
+	c, err := New(WithWebSearchMode(WebSearchModeLocal), WithBaseURL(defaultBaseURL+"/v1"), WithPrefixCompletion(true))
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
@@ -834,7 +844,7 @@ func TestStreamResponseWithPrefixFallsBackForCustomNonBetaBaseURL(t *testing.T) 
 	defer srv.Close()
 
 	t.Setenv("DEEPSEEK_API_KEY", "test-key")
-	c, err := New(WithBaseURL(srv.URL), WithHTTPClient(srv.Client()), WithPrefixCompletion(true))
+	c, err := New(WithWebSearchMode(WebSearchModeLocal), WithBaseURL(srv.URL), WithHTTPClient(srv.Client()), WithPrefixCompletion(true))
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
@@ -862,7 +872,7 @@ func TestStreamResponseWithPrefixFallsBackForCustomNonBetaBaseURL(t *testing.T) 
 }
 
 func TestStreamResponseWithAttachmentRequiresMultimodalConfig(t *testing.T) {
-	c, err := New(WithAPIKey("test-key"))
+	c, err := New(WithWebSearchMode(WebSearchModeLocal), WithAPIKey("test-key"))
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
@@ -907,6 +917,7 @@ func TestStreamResponseWithAttachmentUsesMultimodalEndpoint(t *testing.T) {
 
 	imagePath := writeDeepSeekTestFile(t, "screen.png", []byte("fake-image"))
 	c, err := New(
+		WithWebSearchMode(WebSearchModeLocal),
 		WithAPIKey("main-key"),
 		WithBaseURL("https://api.deepseek.example/v1"),
 		WithHTTPClient(srv.Client()),
@@ -994,6 +1005,7 @@ func TestStreamResponseWithInjectedAttachmentTurnUsesMultimodalEndpoint(t *testi
 
 	imagePath := writeDeepSeekTestFile(t, "screen.png", []byte("fake-image"))
 	c, err := New(
+		WithWebSearchMode(WebSearchModeLocal),
 		WithAPIKey("main-key"),
 		WithBaseURL("https://api.deepseek.example/v1"),
 		WithHTTPClient(srv.Client()),
@@ -1060,6 +1072,7 @@ func TestStreamResponseWithAttachmentStripsReasoningContentForOpenAIPayload(t *t
 
 	imagePath := writeDeepSeekTestFile(t, "screen.png", []byte("fake-image"))
 	c, err := New(
+		WithWebSearchMode(WebSearchModeLocal),
 		WithAPIKey("main-key"),
 		WithHTTPClient(srv.Client()),
 		WithThinking(true),
@@ -1139,6 +1152,7 @@ func TestStreamResponseAfterAttachmentFollowUpUsesMainEndpoint(t *testing.T) {
 
 	imagePath := writeDeepSeekTestFile(t, "screen.png", []byte("fake-image"))
 	c, err := New(
+		WithWebSearchMode(WebSearchModeLocal),
 		WithAPIKey("main-key"),
 		WithBaseURL(srv.URL+"/main"),
 		WithHTTPClient(srv.Client()),
@@ -1209,6 +1223,7 @@ func TestStreamResponseHiddenFollowUpAfterAttachmentUsesMainEndpoint(t *testing.
 
 	imagePath := writeDeepSeekTestFile(t, "screen.png", []byte("fake-image"))
 	c, err := New(
+		WithWebSearchMode(WebSearchModeLocal),
 		WithAPIKey("main-key"),
 		WithBaseURL(srv.URL+"/main"),
 		WithHTTPClient(srv.Client()),
@@ -1256,6 +1271,7 @@ func TestStreamResponseHiddenFollowUpAfterAttachmentUsesMainEndpoint(t *testing.
 func TestStreamResponseWithAttachmentErrorsWhenConfiguredMultimodalKeyEnvMissing(t *testing.T) {
 	imagePath := writeDeepSeekTestFile(t, "screen.png", []byte("fake-image"))
 	c, err := New(
+		WithWebSearchMode(WebSearchModeLocal),
 		WithAPIKey("main-key"),
 		WithMultimodal(MultimodalConfig{
 			Enabled:   true,
@@ -1301,6 +1317,7 @@ func TestStreamResponseWithAttachmentResolvesConfiguredMultimodalKeyEnv(t *testi
 
 	imagePath := writeDeepSeekTestFile(t, "screen.png", []byte("fake-image"))
 	c, err := New(
+		WithWebSearchMode(WebSearchModeLocal),
 		WithAPIKey("main-key"),
 		WithHTTPClient(srv.Client()),
 		WithMultimodal(MultimodalConfig{
@@ -1356,6 +1373,7 @@ func TestStreamResponseWithPrefixAndAttachmentSkipsBetaEndpoint(t *testing.T) {
 
 	imagePath := writeDeepSeekTestFile(t, "screen.png", []byte("fake-image"))
 	c, err := New(
+		WithWebSearchMode(WebSearchModeLocal),
 		WithAPIKey("test-key"),
 		WithBaseURL(srv.URL+"/beta"),
 		WithHTTPClient(srv.Client()),
@@ -1399,6 +1417,7 @@ func TestStreamResponseWithPrefixAfterAttachmentFollowUpUsesBetaEndpoint(t *test
 
 	imagePath := writeDeepSeekTestFile(t, "screen.png", []byte("fake-image"))
 	c, err := New(
+		WithWebSearchMode(WebSearchModeLocal),
 		WithAPIKey("main-key"),
 		WithBaseURL(srv.URL+"/beta"),
 		WithHTTPClient(srv.Client()),
@@ -1916,7 +1935,7 @@ func TestDeepSeek400IncludesBoundedMessageDiagnostics(t *testing.T) {
 	defer srv.Close()
 
 	t.Setenv("DEEPSEEK_API_KEY", "test-key")
-	c, err := New(WithBaseURL(srv.URL), WithHTTPClient(srv.Client()), WithRetryPolicy(llmretry.Policy{MaxAttempts: 1}))
+	c, err := New(WithWebSearchMode(WebSearchModeLocal), WithBaseURL(srv.URL), WithHTTPClient(srv.Client()), WithRetryPolicy(llmretry.Policy{MaxAttempts: 1}))
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}

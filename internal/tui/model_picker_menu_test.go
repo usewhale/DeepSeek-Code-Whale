@@ -1077,3 +1077,25 @@ func TestFileDiffMetadataPreviewAllowsLargeTranslationDiff(t *testing.T) {
 		t.Fatalf("expected translation-size diff to fit in preview:\n%s", got)
 	}
 }
+func TestPermissionsMenuNavigationWrapsAround(t *testing.T) {
+	m, _ := newModelWithDispatchSpy()
+	next, _ := m.Update(svcMsg(protocol.Event{Kind: protocol.EventPermissionsSelectionRequested, AutoAccept: false, AutoReview: false}))
+	m = next.(model)
+	if m.mode != modePermissionsMenu || m.permissionsMenu.selected != 0 {
+		t.Fatalf("expected permissions menu with ask selected, mode=%v selected=%d", m.mode, m.permissionsMenu.selected)
+	}
+
+	// Up from the first item (ask) wraps to the last (cancel).
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	m = next.(model)
+	if m.permissionsMenu.selected != 3 {
+		t.Fatalf("expected up at ask to wrap to cancel, got %d", m.permissionsMenu.selected)
+	}
+
+	// Down from the last item wraps back to the first.
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = next.(model)
+	if m.permissionsMenu.selected != 0 {
+		t.Fatalf("expected down at cancel to wrap to ask, got %d", m.permissionsMenu.selected)
+	}
+}

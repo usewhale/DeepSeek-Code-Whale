@@ -120,7 +120,8 @@ func (s *Service) runSideQuestion(question string) {
 }
 
 func (s *Service) runTurnWith(start func(context.Context) (<-chan agent.AgentEvent, error)) {
-	turnCtx, cancel := context.WithCancel(s.ctx)
+	turnCtx, cancelCause := context.WithCancelCause(s.ctx)
+	cancel := context.CancelFunc(func() { cancelCause(context.Canceled) })
 	s.cancelMu.Lock()
 	if s.active {
 		s.cancelMu.Unlock()
@@ -131,11 +132,13 @@ func (s *Service) runTurnWith(start func(context.Context) (<-chan agent.AgentEve
 	}
 	s.active = true
 	s.cancel = cancel
+	s.cancelCause = cancelCause
 	s.resetInteractionShutdown()
 	s.cancelMu.Unlock()
 	defer func() {
 		s.cancelMu.Lock()
 		s.cancel = nil
+		s.cancelCause = nil
 		s.active = false
 		s.cancelMu.Unlock()
 		cancel()

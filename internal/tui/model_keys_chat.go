@@ -25,23 +25,33 @@ func (m *model) handleChatModeKey(msg tea.KeyMsg) (tea.Cmd, bool) {
 			m.dispatchIntent(protocol.Intent{Kind: protocol.IntentToggleMode})
 			return nil, true
 		}
+	case "alt+p", "meta+p":
+		if m.localSubmitPending > 0 {
+			m.status = "wait for command to finish"
+			m.refreshViewportContent()
+			return m.flushNativeScrollbackCmd(), true
+		}
+		// Allowed while busy: the permission intents emit EventTurnDone, which
+		// the TUI treats as turn completion, so cyclePermissions dispatches the
+		// quiet variants mid-turn (no EventTurnDone) — same path as the approval
+		// modal's approve + enable auto-accept.
+		if !m.hasSlashSuggestions() && !m.hasFilePanel() && !m.hasSkillSuggestions() {
+			m.cyclePermissions()
+			return nil, true
+		}
 	case "up":
 		if m.hasSlashSuggestions() {
-			if m.slash.selected > 0 {
-				m.slash.selected--
-			}
+			m.slash.selected = wrapSelection(m.slash.selected, len(m.slash.matches), -1)
 			return nil, true
 		}
 		if m.hasFilePanel() {
-			if m.hasFileSuggestions() && m.files.selected > 0 {
-				m.files.selected--
+			if m.hasFileSuggestions() {
+				m.files.selected = wrapSelection(m.files.selected, len(m.files.matches), -1)
 			}
 			return nil, true
 		}
 		if m.hasSkillSuggestions() {
-			if m.skills.selected > 0 {
-				m.skills.selected--
-			}
+			m.skills.selected = wrapSelection(m.skills.selected, len(m.skills.matches), -1)
 			return nil, true
 		}
 		if m.shouldHandleHistoryNavigation() {
@@ -51,21 +61,17 @@ func (m *model) handleChatModeKey(msg tea.KeyMsg) (tea.Cmd, bool) {
 		}
 	case "down":
 		if m.hasSlashSuggestions() {
-			if m.slash.selected < len(m.slash.matches)-1 {
-				m.slash.selected++
-			}
+			m.slash.selected = wrapSelection(m.slash.selected, len(m.slash.matches), 1)
 			return nil, true
 		}
 		if m.hasFilePanel() {
-			if m.hasFileSuggestions() && m.files.selected < len(m.files.matches)-1 {
-				m.files.selected++
+			if m.hasFileSuggestions() {
+				m.files.selected = wrapSelection(m.files.selected, len(m.files.matches), 1)
 			}
 			return nil, true
 		}
 		if m.hasSkillSuggestions() {
-			if m.skills.selected < len(m.skills.matches)-1 {
-				m.skills.selected++
-			}
+			m.skills.selected = wrapSelection(m.skills.selected, len(m.skills.matches), 1)
 			return nil, true
 		}
 		if m.shouldHandleHistoryNavigation() {
@@ -91,7 +97,7 @@ func (m *model) handleChatModeKey(msg tea.KeyMsg) (tea.Cmd, bool) {
 	case "esc":
 		if m.busy {
 			m.prepareQueuedPromptAfterInterrupt()
-			return m.interruptBusyTurn(), true
+			return m.interruptBusyTurn("esc"), true
 		}
 		if m.page != pageChat {
 			m.page = pageChat
@@ -117,6 +123,31 @@ func (m *model) handleChatModeKey(msg tea.KeyMsg) (tea.Cmd, bool) {
 		return m.handleViewportScrollKey(msg.String()), true
 	}
 	return nil, false
+}
+
+// cyclePermissions advances the permission mode with the Alt+P shortcut:
+// ask -> auto-review -> auto-accept -> ask. Local state is updated
+// optimistically so the footer indicator responds instantly; the service
+// confirms the same state via EventInfo (AutoAcceptKnown). While a turn is
+// busy the intents are dispatched with Quiet set so the service does not emit
+// EventTurnDone, which the TUI would otherwise treat as turn completion and
+// commit the live transcript while the backend keeps streaming.
+func (m *model) cyclePermissions() {
+	quiet := m.busy
+	switch nextPermissionsMode(m.autoAccept, m.autoReviewEnabled) {
+	case "auto-review":
+		m.dispatchIntent(protocol.Intent{Kind: protocol.IntentSetAutoReview, AutoReview: true, Quiet: quiet})
+		m.autoReviewEnabled = true
+		m.autoAccept = false
+	case "auto-accept":
+		m.dispatchIntent(protocol.Intent{Kind: protocol.IntentSetApprovalMode, ApprovalMode: "auto_accept", Quiet: quiet})
+		m.autoAccept = true
+		m.autoReviewEnabled = false
+	default: // ask
+		m.dispatchIntent(protocol.Intent{Kind: protocol.IntentSetApprovalMode, ApprovalMode: "ask", Quiet: quiet})
+		m.autoAccept = false
+		m.autoReviewEnabled = false
+	}
 }
 
 func (m *model) handleDiffPageKey(msg tea.KeyMsg) tea.Cmd {

@@ -13,8 +13,14 @@ const (
 	MiniMaxM27ContextWindow      = 204_800
 	DefaultAutoCompactThreshold  = 0.85
 	DefaultAgentCompactThreshold = 0.90
-	DefaultMemoryMaxChars        = 8000
-	DefaultMemoryFileOrderCSV    = "AGENTS.md,.claude/instructions.md,CLAUDE.md"
+	// DefaultMaxToolIters is the ACP entrypoint's tool-iteration cap. It must
+	// stay a finite backstop: the dynamic loop guards (storm rounds, progress
+	// redundancy) cannot see mutating-argument-varying loops, so a cap is the
+	// only guaranteed termination for that loop class. 300 sits far above any
+	// recorded healthy turn (max 126) while bounding the invisible loops.
+	DefaultMaxToolIters       = 300
+	DefaultMemoryMaxChars     = 8000
+	DefaultMemoryFileOrderCSV = "AGENTS.md,.claude/instructions.md,CLAUDE.md"
 )
 
 var supportedModels = []string{

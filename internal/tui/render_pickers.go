@@ -84,6 +84,19 @@ func permissionsMode(autoAccept, autoReview bool) string {
 	return "ask"
 }
 
+// nextPermissionsMode returns the permission mode reached by cycling forward
+// with the Alt+P shortcut (ask -> auto-review -> auto-accept -> ask).
+func nextPermissionsMode(autoAccept, autoReview bool) string {
+	switch permissionsMode(autoAccept, autoReview) {
+	case "auto-review":
+		return "auto-accept"
+	case "auto-accept":
+		return "ask"
+	default:
+		return "auto-review"
+	}
+}
+
 func currentLabel(label string, current bool) string {
 	if current {
 		return label + " (current)"

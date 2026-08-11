@@ -26,6 +26,8 @@ type providerOptions struct {
 	StreamIdleTimeout        time.Duration
 	DeepSeekPrefixCompletion bool
 	DeepSeekMultimodal       MultimodalProviderConfig
+	DeepSeekWebSearch        deepseek.WebSearchMode
+	DeepSeekAPI              deepseek.API
 }
 
 func newProvider(opts providerOptions) (llm.Provider, error) {
@@ -56,7 +58,6 @@ func newMiniMaxProvider(opts providerOptions) (llm.Provider, error) {
 		APIKeyEnv:         opts.MiniMax.APIKeyEnv,
 		BaseURL:           baseURL,
 		Model:             opts.Model,
-		ReasoningEffort:   opts.ReasoningEffort,
 		ThinkingEnabled:   opts.ThinkingEnabled,
 		MaxTokens:         opts.MaxTokens,
 		RetryPolicy:       opts.RetryPolicy,
@@ -132,6 +133,8 @@ func newDeepSeekProvider(opts providerOptions) (llm.Provider, error) {
 			Model:     mm.Model,
 		}))
 	}
+	dsOpts = append(dsOpts, deepseek.WithWebSearchMode(opts.DeepSeekWebSearch))
+	dsOpts = append(dsOpts, deepseek.WithAPI(opts.DeepSeekAPI))
 	return deepseek.New(dsOpts...)
 }
 

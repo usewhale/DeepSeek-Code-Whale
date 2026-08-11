@@ -10,8 +10,28 @@ import (
 	"strings"
 )
 
-func (a *App) SessionID() string                          { return a.sessionID }
-func (a *App) SessionsDir() string                        { return a.sessionsDir }
+func (a *App) SessionID() string {
+	a.sessionMu.Lock()
+	defer a.sessionMu.Unlock()
+	return a.sessionID
+}
+func (a *App) SessionsDir() string { return a.sessionsDir }
+
+// setSessionID is the only mutating path to sessionID. All writers (resume,
+// session-new, fork) and the async MCP restore readers serialize on sessionMu.
+func (a *App) setSessionID(id string) {
+	a.sessionMu.Lock()
+	defer a.sessionMu.Unlock()
+	a.sessionID = id
+}
+
+// sessionPath returns a consistent snapshot of the session location for paths
+// built by goroutines outside the dispatch loop (MCP startup restore).
+func (a *App) sessionPath() (sessionsDir, sessionID string) {
+	a.sessionMu.Lock()
+	defer a.sessionMu.Unlock()
+	return a.sessionsDir, a.sessionID
+}
 func (a *App) CurrentMode() session.Mode                  { return a.currentMode }
 func (a *App) PermissionDefault() policy.PermissionAction { return a.permissionPolicy.Default }
 func (a *App) AutoAcceptPermissions() bool {

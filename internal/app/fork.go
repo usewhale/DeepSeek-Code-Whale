@@ -78,7 +78,7 @@ func (a *App) forkCurrentSession(name string) (forkSessionResult, error) {
 		}
 	}
 
-	a.sessionID = nextID
+	a.setSessionID(nextID)
 	a.resetAgent()
 	resume := resumeCommand(a.workspaceRoot, sourceID)
 	msg := fmt.Sprintf("Forked conversation %q. You are now in the fork.\nTo resume the original: %s", title, resume)

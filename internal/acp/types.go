@@ -117,6 +117,8 @@ const (
 	MethodAuthenticate        = "authenticate"
 	MethodSessionNew          = "session/new"
 	MethodSessionLoad         = "session/load"
+	MethodSessionList         = "session/list"
+	MethodSessionDelete       = "session/delete"
 	MethodSessionSetMode      = "session/set_mode"
 	MethodSessionSetConfigOpt = "session/set_config_option"
 	MethodSessionPrompt       = "session/prompt"
@@ -197,9 +199,27 @@ type MCPCapabilities struct {
 
 // SessionCapabilities describes session-related agent capabilities.
 type SessionCapabilities struct {
+	// List advertises support for the session/list method. Supplying an empty
+	// object means the agent supports listing sessions (see ACP session
+	// management); clients such as Zed gate their session-history UI on it.
+	List *SessionListCapabilities `json:"list,omitempty"`
+	// Delete advertises support for the session/delete method. Supplying an
+	// empty object means the agent supports deleting sessions (see ACP session
+	// management); clients such as Zed gate the agent-panel Trash button on it.
+	Delete *SessionDeleteCapabilities `json:"delete,omitempty"`
+	// AdditionalDirectories advertises support for additionalDirectories on
+	// session lifecycle requests. Not implemented.
 	AdditionalDirectories *struct{}      `json:"additionalDirectories,omitempty"`
 	Meta                  map[string]any `json:"_meta,omitempty"`
 }
+
+// SessionListCapabilities is the (currently empty) capability object that
+// advertises session/list support.
+type SessionListCapabilities struct{}
+
+// SessionDeleteCapabilities is the (currently empty) capability object that
+// advertises session/delete support.
+type SessionDeleteCapabilities struct{}
 
 // AgentAuthCapabilities describes authentication capabilities.
 type AgentAuthCapabilities struct {
@@ -254,13 +274,20 @@ type NewSessionResponse struct {
 
 // MCPServer describes an MCP server the client wants the agent to connect to.
 type MCPServer struct {
-	Type    string            `json:"type"` // "stdio", "http", "sse"
-	Name    string            `json:"name"`
-	Command string            `json:"command,omitempty"`
-	Args    []string          `json:"args,omitempty"`
-	Env     map[string]string `json:"env,omitempty"`
-	URL     string            `json:"url,omitempty"`
-	Headers []HTTPHeader      `json:"headers,omitempty"`
+	Type    string        `json:"type"` // "stdio", "http", "sse"
+	Name    string        `json:"name"`
+	Command string        `json:"command,omitempty"`
+	Args    []string      `json:"args,omitempty"`
+	Env     []EnvVariable `json:"env,omitempty"`
+	URL     string        `json:"url,omitempty"`
+	Headers []HTTPHeader  `json:"headers,omitempty"`
+}
+
+// EnvVariable is a name/value pair for environment variables in the ACP
+// mcpServers protocol shape (array of {name, value} objects).
+type EnvVariable struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
 }
 
 // HTTPHeader is a name/value pair for HTTP MCP transports.
@@ -319,6 +346,54 @@ type LoadSessionResponse struct {
 	Messages []ContentBlock    `json:"messages,omitempty"`
 	Modes    *SessionModeState `json:"modes,omitempty"`
 	Meta     map[string]any    `json:"_meta,omitempty"`
+}
+
+// ---------------------------------------------------------------------------
+// Session / list
+// ---------------------------------------------------------------------------
+
+// ListSessionsRequest lists the agent's persisted sessions so the client can
+// offer a session-history picker (e.g. Zed's agent panel). cwd filters to
+// sessions whose working directory equals the given absolute path; cursor
+// requests the next page when a previous response returned nextCursor.
+type ListSessionsRequest struct {
+	Cwd    string `json:"cwd,omitempty"`
+	Cursor string `json:"cursor,omitempty"`
+}
+
+// ListSessionsResponse returns the (filtered) session list. nextCursor is
+// omitted when there are no more pages.
+type ListSessionsResponse struct {
+	Sessions   []SessionInfo `json:"sessions"`
+	NextCursor string        `json:"nextCursor,omitempty"`
+}
+
+// SessionInfo describes one persisted session for session/list.
+type SessionInfo struct {
+	SessionID             string   `json:"sessionId"`
+	Cwd                   string   `json:"cwd"`
+	AdditionalDirectories []string `json:"additionalDirectories,omitempty"`
+	Title                 string   `json:"title,omitempty"`
+	UpdatedAt             string   `json:"updatedAt,omitempty"`
+}
+
+// ---------------------------------------------------------------------------
+// Session / delete
+// ---------------------------------------------------------------------------
+
+// DeleteSessionRequest deletes a persisted session so it no longer appears in
+// session/list and can no longer be loaded. Per the ACP schema the sessionId
+// is required; _meta is ignored.
+type DeleteSessionRequest struct {
+	SessionID string         `json:"sessionId"`
+	Meta      map[string]any `json:"_meta,omitempty"`
+}
+
+// DeleteSessionResponse is the empty success result of session/delete. The
+// client refreshes its session list itself (e.g. Zed sends
+// SessionListUpdate::Refresh), so no notification is returned.
+type DeleteSessionResponse struct {
+	Meta map[string]any `json:"_meta,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
@@ -600,11 +675,42 @@ type PermissionToolCall struct {
 	Meta       map[string]any    `json:"_meta,omitempty"`
 }
 
+// PermissionOptionKind is the ACP schema `PermissionOptionKind` enum
+// (agent-client-protocol-schema v1/client.rs and v2/client.rs). The schema
+// defines exactly these four values; the client deserializes the
+// request_permission payload with a strict serde enum, so any other string
+// (e.g. "allow_tool") fails at deserialization and the approval is silently
+// denied. New kinds must first exist in the schema crate.
+type PermissionOptionKind string
+
+// Schema-valid permission option kinds. Keep in sync with the
+// agent-client-protocol-schema `PermissionOptionKind` enum.
+const (
+	KindAllowOnce    PermissionOptionKind = "allow_once"
+	KindAllowAlways  PermissionOptionKind = "allow_always"
+	KindRejectOnce   PermissionOptionKind = "reject_once"
+	KindRejectAlways PermissionOptionKind = "reject_always"
+)
+
+// Valid reports whether k is one of the four schema-defined kinds. Any new
+// kind must be added to the schema crate first, then to this list.
+func (k PermissionOptionKind) Valid() bool {
+	switch k {
+	case KindAllowOnce, KindAllowAlways, KindRejectOnce, KindRejectAlways:
+		return true
+	default:
+		return false
+	}
+}
+
+// String renders the wire value of the kind.
+func (k PermissionOptionKind) String() string { return string(k) }
+
 // PermissionOption is a choice presented to the user.
 type PermissionOption struct {
-	OptionID string `json:"optionId"`
-	Name     string `json:"name"`
-	Kind     string `json:"kind"` // "allow_once", "allow_always", "reject_once"
+	OptionID string               `json:"optionId"`
+	Name     string               `json:"name"`
+	Kind     PermissionOptionKind `json:"kind"`
 }
 
 // PermissionOutcome mirrors the ACP schema's nested outcome wrapper.

@@ -114,19 +114,19 @@ func (m *model) handleHooksManagerKey(msg tea.KeyMsg) tea.Cmd {
 		m.toggleSelectedHook()
 	case "up", "k":
 		if m.hooksManager.page == hooksPageEvents {
-			if m.hooksManager.selectedEvent > 0 {
-				m.hooksManager.selectedEvent--
+			if len(m.hooksManager.state.Events) > 0 {
+				m.hooksManager.selectedEvent = wrapSelection(m.hooksManager.selectedEvent, len(m.hooksManager.state.Events), -1)
 			}
-		} else if m.hooksManager.selectedHandler > 0 {
-			m.hooksManager.selectedHandler--
+		} else if len(m.hooksForSelectedEvent()) > 0 {
+			m.hooksManager.selectedHandler = wrapSelection(m.hooksManager.selectedHandler, len(m.hooksForSelectedEvent()), -1)
 		}
 	case "down", "j":
 		if m.hooksManager.page == hooksPageEvents {
-			if m.hooksManager.selectedEvent < len(m.hooksManager.state.Events)-1 {
-				m.hooksManager.selectedEvent++
+			if len(m.hooksManager.state.Events) > 0 {
+				m.hooksManager.selectedEvent = wrapSelection(m.hooksManager.selectedEvent, len(m.hooksManager.state.Events), 1)
 			}
-		} else if m.hooksManager.selectedHandler < len(m.hooksForSelectedEvent())-1 {
-			m.hooksManager.selectedHandler++
+		} else if len(m.hooksForSelectedEvent()) > 0 {
+			m.hooksManager.selectedHandler = wrapSelection(m.hooksManager.selectedHandler, len(m.hooksForSelectedEvent()), 1)
 		}
 	case " ":
 		if m.hooksManager.page == hooksPageHandlers {
