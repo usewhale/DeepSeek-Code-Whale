@@ -118,6 +118,7 @@ func (a *App) ensureAgent() (*agent.Agent, error) {
 			agent.WithHookRunner(a.hookRunner),
 			agent.WithExtraSystemBlocks(pluginBlocks...),
 			agent.WithDynamicSystemBlocksForTurn(a.workflowDynamicSystemBlock),
+			agent.WithDynamicSystemBlocks(func() string { return a.renderDeferredToolsBlock() }),
 			agent.WithProjectMemory(a.cfg.MemoryEnabled, a.cfg.MemoryMaxChars, parseCSVList(a.cfg.MemoryFileOrder), a.workspaceRoot),
 			agent.WithWorktreeContext(a.worktree.Path, a.worktree.OriginalWorkspace),
 			agent.WithMaxParallelSubagents(a.cfg.MaxParallelSubagents),

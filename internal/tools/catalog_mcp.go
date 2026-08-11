@@ -108,11 +108,7 @@ Returns up to 5 matching tools and activates them for subsequent calls.`,
 				names := catalog.Names()
 				hint := ""
 				if len(names) > 0 {
-					sample := names
-					if len(sample) > 5 {
-						sample = sample[:5]
-					}
-					hint = fmt.Sprintf(" No match. Available deferred tools (showing first 5 of %d): %s", len(names), strings.Join(sample, ", "))
+					hint = fmt.Sprintf(" No match. Available deferred tools (%d total): %s", len(names), strings.Join(names, ", "))
 				}
 				return core.ToolResult{
 					ToolCallID: call.ID,

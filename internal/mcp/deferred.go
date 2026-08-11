@@ -129,9 +129,6 @@ func (c *DeferredToolCatalog) selectSearch(names string) []DeferredToolMeta {
 	for _, t := range c.tools {
 		if wanted[t.Name] {
 			results = append(results, t)
-			if len(results) >= maxSearchResults {
-				break
-			}
 		}
 	}
 	return results

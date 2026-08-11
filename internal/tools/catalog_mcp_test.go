@@ -186,6 +186,9 @@ func TestToolSearchNoMatch(t *testing.T) {
 	if !strings.Contains(result.ModelText, "mcp__s__alpha") {
 		t.Fatalf("expected hint with available tool names, got %q", result.ModelText)
 	}
+	if !strings.Contains(result.ModelText, "(1 total)") {
+		t.Fatalf("expected hint with total count, got %q", result.ModelText)
+	}
 }
 
 func TestToolSearchWithoutPromoterReturnsInfo(t *testing.T) {

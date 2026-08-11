@@ -165,6 +165,29 @@ func TestSearchSelectFormEmptyNames(t *testing.T) {
 	}
 }
 
+func TestSearchSelectFormNoCap(t *testing.T) {
+	// select: queries should not be capped at maxSearchResults — the user
+	// explicitly requested those names, so all should be returned.
+	tools := make([]DeferredToolMeta, 0, maxSearchResults+5)
+	for i := range maxSearchResults + 5 {
+		tools = append(tools, testCatalogMeta(
+			"mcp__s__tool_"+string(rune('a'+i%26))+string(rune('a'+i/26)),
+			"s",
+			"",
+		))
+	}
+	c := NewDeferredToolCatalog(tools)
+	// Build a select: query with all tool names.
+	names := make([]string, len(tools))
+	for i, t := range tools {
+		names[i] = t.Name
+	}
+	results := c.Search("select:" + strings.Join(names, ","))
+	if len(results) != len(tools) {
+		t.Fatalf("select should return all %d requested tools, got %d", len(tools), len(results))
+	}
+}
+
 func TestSearchMustHaveForm(t *testing.T) {
 	c := NewDeferredToolCatalog([]DeferredToolMeta{
 		testCatalogMeta("mcp__github__search_code", "github", "search code in repos"),
