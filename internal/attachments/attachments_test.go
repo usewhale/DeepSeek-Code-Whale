@@ -126,6 +126,25 @@ func TestPrepareAudioFormatsMatchOpenAICompatibleEncoder(t *testing.T) {
 	}
 }
 
+func TestPrepareClassifiesVideo(t *testing.T) {
+	tmp := t.TempDir()
+	src := filepath.Join(tmp, "clip.mp4")
+	if err := os.WriteFile(src, []byte("fake-video"), 0o644); err != nil {
+		t.Fatalf("write video: %v", err)
+	}
+	prepared, err := Prepare(context.Background(), []Source{{Path: src}}, Options{
+		SessionsDir:   filepath.Join(tmp, "sessions"),
+		SessionID:     "video",
+		MaxVideoBytes: 1024,
+	})
+	if err != nil {
+		t.Fatalf("Prepare video: %v", err)
+	}
+	if prepared[0].Ref.Kind != core.AttachmentKindVideo || prepared[0].Ref.MIME != "video/mp4" {
+		t.Fatalf("kind/mime = %s/%s", prepared[0].Ref.Kind, prepared[0].Ref.MIME)
+	}
+}
+
 func TestPrepareFollowsSymlinkToRegularFile(t *testing.T) {
 	tmp := t.TempDir()
 	target := filepath.Join(tmp, "target.png")

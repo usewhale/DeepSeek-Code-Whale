@@ -80,8 +80,11 @@ func (a *App) ensureAgent() (*agent.Agent, error) {
 		if a.pluginManager != nil {
 			pluginBlocks = a.pluginManager.StartupBlocks(a.ctx)
 		}
-		provider, err := newDeepSeekProvider(providerOptions{
+		provider, err := newProvider(providerOptions{
+			Provider:                 a.cfg.Provider,
 			APIKey:                   a.apiKey,
+			MiniMaxAPIKey:            a.cfg.MiniMax.APIKey,
+			MiniMax:                  a.cfg.MiniMax,
 			BaseURL:                  a.cfg.APIBaseURL,
 			Model:                    a.model,
 			ReasoningEffort:          a.reasoningEffort,

@@ -9,6 +9,8 @@ const (
 	DefaultThinkingEnabled       = true
 	DefaultContextWindow         = 128_000
 	DeepSeekV4ContextWindow      = 1_000_000
+	MiniMaxM3ContextWindow       = 1_000_000
+	MiniMaxM27ContextWindow      = 204_800
 	DefaultAutoCompactThreshold  = 0.85
 	DefaultAgentCompactThreshold = 0.90
 	// DefaultMaxToolIters is the ACP entrypoint's tool-iteration cap. It must
@@ -24,6 +26,8 @@ const (
 var supportedModels = []string{
 	DefaultModel,
 	ProModel,
+	"MiniMax-M3",
+	"MiniMax-M2.7",
 }
 
 var defaultMemoryFileOrder = []string{
@@ -55,6 +59,14 @@ func IsDeepSeekV4Model(model string) bool {
 	return strings.Contains(m, DefaultModel) || strings.Contains(m, ProModel)
 }
 
+func IsMiniMaxM3Model(model string) bool {
+	return strings.EqualFold(strings.TrimSpace(model), "MiniMax-M3")
+}
+
+func IsMiniMaxM27Model(model string) bool {
+	return strings.EqualFold(strings.TrimSpace(model), "MiniMax-M2.7")
+}
+
 // ContextWindowForModel returns the context window size in tokens for model.
 func ContextWindowForModel(model string) int {
 	if strings.TrimSpace(model) == "" {
@@ -62,6 +74,12 @@ func ContextWindowForModel(model string) int {
 	}
 	if IsDeepSeekV4Model(model) {
 		return DeepSeekV4ContextWindow
+	}
+	if IsMiniMaxM3Model(model) {
+		return MiniMaxM3ContextWindow
+	}
+	if IsMiniMaxM27Model(model) {
+		return MiniMaxM27ContextWindow
 	}
 	return DefaultContextWindow
 }

@@ -35,6 +35,7 @@ type Config struct {
 	MemoryMaxChars                 int
 	MemoryFileOrder                string
 	BudgetWarningUSD               float64
+	Provider                       string
 	Model                          string
 	ModelExplicit                  bool
 	ReasoningEffort                string
@@ -49,6 +50,7 @@ type Config struct {
 	RetryMaxDelay                  time.Duration
 	DeepSeekPrefixCompletion       bool
 	DeepSeekMultimodal             MultimodalProviderConfig
+	MiniMax                        MiniMaxProviderConfig
 	DeepSeekWebSearch              deepseek.WebSearchMode
 	DeepSeekAPI                    deepseek.API
 	ShellForegroundWaitDefaultMS   int
@@ -81,6 +83,13 @@ type MultimodalProviderConfig struct {
 	APIKey    string
 	APIKeyEnv string
 	Model     string
+}
+
+type MiniMaxProviderConfig struct {
+	Region    string
+	BaseURL   string
+	APIKey    string
+	APIKeyEnv string
 }
 
 type StartOptions struct {

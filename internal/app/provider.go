@@ -7,11 +7,15 @@ import (
 
 	"github.com/usewhale/whale/internal/llm"
 	"github.com/usewhale/whale/internal/llm/deepseek"
+	"github.com/usewhale/whale/internal/llm/minimax"
 	llmretry "github.com/usewhale/whale/internal/llm/retry"
 )
 
 type providerOptions struct {
+	Provider                 string
 	APIKey                   string
+	MiniMaxAPIKey            string
+	MiniMax                  MiniMaxProviderConfig
 	BaseURL                  string
 	Model                    string
 	ReasoningEffort          string
@@ -24,6 +28,60 @@ type providerOptions struct {
 	DeepSeekMultimodal       MultimodalProviderConfig
 	DeepSeekWebSearch        deepseek.WebSearchMode
 	DeepSeekAPI              deepseek.API
+}
+
+func newProvider(opts providerOptions) (llm.Provider, error) {
+	if strings.TrimSpace(opts.Model) == "" {
+		opts.Model = defaultModelForProvider(opts.Provider)
+	}
+	switch strings.ToLower(strings.TrimSpace(opts.Provider)) {
+	case "minimax":
+		return newMiniMaxProvider(opts)
+	default:
+		return newDeepSeekProvider(opts)
+	}
+}
+
+func defaultModelForProvider(provider string) string {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "minimax":
+		return minimax.DefaultModel
+	default:
+		return ""
+	}
+}
+
+func newMiniMaxProvider(opts providerOptions) (llm.Provider, error) {
+	baseURL := firstProviderValue(opts.MiniMax.BaseURL, opts.BaseURL, minimaxBaseURLForRegion(opts.MiniMax.Region))
+	return minimax.New(minimax.Options{
+		APIKey:            firstProviderValue(opts.MiniMax.APIKey, opts.MiniMaxAPIKey),
+		APIKeyEnv:         opts.MiniMax.APIKeyEnv,
+		BaseURL:           baseURL,
+		Model:             opts.Model,
+		ThinkingEnabled:   opts.ThinkingEnabled,
+		MaxTokens:         opts.MaxTokens,
+		RetryPolicy:       opts.RetryPolicy,
+		StreamMaxAttempts: opts.StreamMaxAttempts,
+		StreamIdleTimeout: opts.StreamIdleTimeout,
+	})
+}
+
+func minimaxBaseURLForRegion(region string) string {
+	switch strings.ToLower(strings.TrimSpace(region)) {
+	case "cn", "cn_zh", "china":
+		return minimax.CNBaseURL
+	default:
+		return minimax.DefaultBaseURL
+	}
+}
+
+func firstProviderValue(values ...string) string {
+	for _, v := range values {
+		if strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
 }
 
 func newDeepSeekProvider(opts providerOptions) (llm.Provider, error) {

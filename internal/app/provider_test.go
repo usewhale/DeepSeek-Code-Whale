@@ -139,6 +139,212 @@ func TestNewDeepSeekProviderKeepsMissingMultimodalAPIKeyEnvError(t *testing.T) {
 	}
 }
 
+func TestNewMiniMaxProviderUsesConfiguredEndpoint(t *testing.T) {
+	var sawRequest bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawRequest = true
+		if r.URL.Path != "/chat/completions" {
+			t.Fatalf("unexpected request path: %s", r.URL.Path)
+		}
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		if payload["model"] != "MiniMax-M3" {
+			t.Fatalf("model = %v, want MiniMax-M3", payload["model"])
+		}
+		thinking, ok := payload["thinking"].(map[string]any)
+		if !ok || thinking["type"] != "adaptive" {
+			t.Fatalf("thinking = %#v, want adaptive", payload["thinking"])
+		}
+		if payload["reasoning_split"] != true {
+			t.Fatalf("reasoning_split = %v, want true", payload["reasoning_split"])
+		}
+		if _, ok := payload["reasoning_effort"]; ok {
+			t.Fatalf("MiniMax request should not include reasoning_effort: %#v", payload)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n")
+		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	provider, err := newProvider(providerOptions{
+		Provider: "minimax",
+		MiniMax: MiniMaxProviderConfig{
+			APIKey:  "test-minimax-key",
+			BaseURL: srv.URL,
+		},
+		Model:           "MiniMax-M3",
+		ThinkingEnabled: true,
+	})
+	if err != nil {
+		t.Fatalf("newProvider: %v", err)
+	}
+	for ev := range provider.StreamResponse(context.Background(), []core.Message{{Role: core.RoleUser, Text: "hi"}}, nil) {
+		if ev.Type == llm.EventError {
+			t.Fatalf("provider error: %v", ev.Err)
+		}
+	}
+	if !sawRequest {
+		t.Fatal("expected request to configured base URL")
+	}
+}
+
+func TestNewMiniMaxProviderSupportsDisabledThinking(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		thinking, ok := payload["thinking"].(map[string]any)
+		if !ok || thinking["type"] != "disabled" {
+			t.Fatalf("thinking = %#v, want disabled", payload["thinking"])
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n")
+		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	provider, err := newProvider(providerOptions{
+		Provider: "minimax",
+		MiniMax: MiniMaxProviderConfig{
+			APIKey:  "test-minimax-key",
+			BaseURL: srv.URL,
+		},
+		Model: "MiniMax-M3",
+	})
+	if err != nil {
+		t.Fatalf("newProvider: %v", err)
+	}
+	for ev := range provider.StreamResponse(context.Background(), []core.Message{{Role: core.RoleUser, Text: "hi"}}, nil) {
+		if ev.Type == llm.EventError {
+			t.Fatalf("provider error: %v", ev.Err)
+		}
+	}
+}
+
+func TestNewMiniMaxM27KeepsThinkingAlwaysOn(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		if _, ok := payload["thinking"]; ok {
+			t.Fatalf("MiniMax-M2.7 request should omit thinking control: %#v", payload["thinking"])
+		}
+		if payload["reasoning_split"] != true {
+			t.Fatalf("reasoning_split = %v, want true", payload["reasoning_split"])
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"think\",\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n")
+		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	provider, err := newProvider(providerOptions{
+		Provider: "minimax",
+		MiniMax: MiniMaxProviderConfig{
+			APIKey:  "test-minimax-key",
+			BaseURL: srv.URL,
+		},
+		Model: "MiniMax-M2.7",
+	})
+	if err != nil {
+		t.Fatalf("newProvider: %v", err)
+	}
+	for ev := range provider.StreamResponse(context.Background(), []core.Message{{Role: core.RoleUser, Text: "hi"}}, nil) {
+		if ev.Type == llm.EventError {
+			t.Fatalf("provider error: %v", ev.Err)
+		}
+	}
+}
+
+func TestNewMiniMaxM3SendsVideoWithAdaptiveThinking(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		thinking, ok := payload["thinking"].(map[string]any)
+		if !ok || thinking["type"] != "adaptive" {
+			t.Fatalf("thinking = %#v, want adaptive", payload["thinking"])
+		}
+		if payload["reasoning_split"] != true {
+			t.Fatalf("reasoning_split = %v, want true", payload["reasoning_split"])
+		}
+		messages, ok := payload["messages"].([]any)
+		if !ok || len(messages) != 1 {
+			t.Fatalf("messages = %#v, want one user message", payload["messages"])
+		}
+		message, ok := messages[0].(map[string]any)
+		if !ok {
+			t.Fatalf("message = %#v", messages[0])
+		}
+		content, ok := message["content"].([]any)
+		if !ok || len(content) != 2 {
+			t.Fatalf("content = %#v, want text and video parts", message["content"])
+		}
+		video, ok := content[1].(map[string]any)
+		if !ok || video["type"] != "video_url" {
+			t.Fatalf("video part = %#v, want video_url", content[1])
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n")
+		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	videoPath := filepath.Join(t.TempDir(), "clip.mp4")
+	if err := os.WriteFile(videoPath, []byte("fake-video"), 0o644); err != nil {
+		t.Fatalf("write video: %v", err)
+	}
+	provider, err := newProvider(providerOptions{
+		Provider: "minimax",
+		MiniMax: MiniMaxProviderConfig{
+			APIKey:  "test-minimax-key",
+			BaseURL: srv.URL,
+		},
+		Model:           "MiniMax-M3",
+		ThinkingEnabled: true,
+	})
+	if err != nil {
+		t.Fatalf("newProvider: %v", err)
+	}
+	history := []core.Message{core.UserMessageFromParts("session", []core.MessagePart{
+		{Type: core.MessagePartText, Text: "describe this clip"},
+		{Type: core.MessagePartAttachment, Attachment: &core.AttachmentRef{
+			Kind:     core.AttachmentKindVideo,
+			Path:     videoPath,
+			MIME:     "video/mp4",
+			Filename: "clip.mp4",
+		}},
+	}, false)}
+	for ev := range provider.StreamResponse(context.Background(), history, nil) {
+		if ev.Type == llm.EventError {
+			t.Fatalf("provider error: %v", ev.Err)
+		}
+	}
+}
+
+func TestNewMiniMaxProviderUsesRegionalDefaultEndpoint(t *testing.T) {
+	_, err := newProvider(providerOptions{
+		Provider: "minimax",
+		MiniMax: MiniMaxProviderConfig{
+			APIKey: "test-minimax-key",
+			Region: "cn_zh",
+		},
+		Model: "MiniMax-M2.7",
+	})
+	if err != nil {
+		t.Fatalf("newProvider: %v", err)
+	}
+	if got := minimaxBaseURLForRegion("cn_zh"); got != "https://api.minimaxi.com/v1" {
+		t.Fatalf("regional endpoint = %s", got)
+	}
+}
+
 func TestTaskProviderUsesConfiguredRetryPolicy(t *testing.T) {
 	t.Setenv("DEEPSEEK_API_KEY", "test-key")
 	var parentRequests atomic.Int32

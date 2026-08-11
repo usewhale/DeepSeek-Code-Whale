@@ -22,12 +22,16 @@ func (a *App) rebuildTaskRuntimeLocked() error {
 	thinking := a.thinkingEnabled
 	apiKey := a.apiKey
 	cfg := a.cfg
+	modelDefault := core.FirstNonEmpty(defaultModelForProvider(cfg.Provider), defaults.DefaultModel)
 	providerFactory := func(model string, maxTokens int) (llm.Provider, error) {
 		if strings.TrimSpace(model) == "" {
-			model = defaults.DefaultModel
+			model = modelDefault
 		}
-		return newDeepSeekProvider(providerOptions{
+		return newProvider(providerOptions{
+			Provider:                 cfg.Provider,
 			APIKey:                   apiKey,
+			MiniMaxAPIKey:            cfg.MiniMax.APIKey,
+			MiniMax:                  cfg.MiniMax,
 			BaseURL:                  cfg.APIBaseURL,
 			Model:                    model,
 			ReasoningEffort:          effort,
@@ -45,11 +49,14 @@ func (a *App) rebuildTaskRuntimeLocked() error {
 	providerFactoryWithOptions := func(req tasks.ProviderRequest) (llm.Provider, error) {
 		model := strings.TrimSpace(req.Model)
 		if model == "" {
-			model = defaults.DefaultModel
+			model = modelDefault
 		}
 		reqEffort := normalizeEffort(core.FirstNonEmpty(strings.TrimSpace(req.Effort), effort))
-		return newDeepSeekProvider(providerOptions{
+		return newProvider(providerOptions{
+			Provider:                 cfg.Provider,
 			APIKey:                   apiKey,
+			MiniMaxAPIKey:            cfg.MiniMax.APIKey,
+			MiniMax:                  cfg.MiniMax,
 			BaseURL:                  cfg.APIBaseURL,
 			Model:                    model,
 			ReasoningEffort:          reqEffort,
@@ -119,7 +126,7 @@ func (a *App) rebuildTaskRuntimeLocked() error {
 		ExtraSkills:                extraSkills,
 		AutoCompact:                cfg.AutoCompact,
 		AutoCompactThreshold:       cfg.AutoCompactThreshold,
-		DefaultModel:               defaults.DefaultModel,
+		DefaultModel:               modelDefault,
 		DefaultMaxTokens:           tasks.DefaultMaxTokens,
 		DefaultMaxToolIters:        tasks.DefaultMaxToolIters,
 		SummaryMaxChars:            tasks.DefaultSummaryMaxChar,

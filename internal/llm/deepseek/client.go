@@ -39,6 +39,7 @@ type Client struct {
 	model                   string
 	reasoningEffort         string
 	thinkingEnabled         bool
+	chatCompletionsThinking *ChatCompletionsThinkingConfig
 	maxTokens               int
 	retryPolicy             llmretry.Policy
 	retrySleeper            llmretry.Sleeper
@@ -60,6 +61,12 @@ type MultimodalConfig struct {
 	APIKey    string
 	APIKeyEnv string
 	Model     string
+}
+
+type ChatCompletionsThinkingConfig struct {
+	EnabledType    string
+	Omit           bool
+	ReasoningSplit bool
 }
 
 func WithBaseURL(v string) Option {
@@ -84,6 +91,13 @@ func WithReasoningEffort(v string) Option {
 
 func WithThinking(enabled bool) Option {
 	return func(c *Client) { c.thinkingEnabled = enabled }
+}
+
+func WithChatCompletionsThinking(cfg ChatCompletionsThinkingConfig) Option {
+	return func(c *Client) {
+		cfg.EnabledType = strings.ToLower(strings.TrimSpace(cfg.EnabledType))
+		c.chatCompletionsThinking = &cfg
+	}
 }
 
 func WithMaxTokens(v int) Option {
@@ -245,14 +259,8 @@ func (c *Client) stream(ctx context.Context, history []core.Message, tools []cor
 		"stream":         true,
 		"stream_options": map[string]any{"include_usage": true},
 		"messages":       msgs,
-		"thinking":       map[string]any{"type": "disabled"},
 	}
-	if c.thinkingEnabled {
-		payload["thinking"] = map[string]any{"type": "enabled"}
-		if strings.TrimSpace(c.reasoningEffort) != "" {
-			payload["reasoning_effort"] = c.reasoningEffort
-		}
-	}
+	c.applyChatCompletionsThinking(payload, true)
 	if len(tools) > 0 {
 		payload["tools"] = toDeepSeekTools(tools)
 	}
@@ -298,14 +306,8 @@ func (c *Client) streamPrefix(ctx context.Context, history []core.Message, prefi
 		"stream":         true,
 		"stream_options": map[string]any{"include_usage": true},
 		"messages":       msgs,
-		"thinking":       map[string]any{"type": "disabled"},
 	}
-	if c.thinkingEnabled {
-		payload["thinking"] = map[string]any{"type": "enabled"}
-		if strings.TrimSpace(c.reasoningEffort) != "" {
-			payload["reasoning_effort"] = c.reasoningEffort
-		}
-	}
+	c.applyChatCompletionsThinking(payload, true)
 	if len(stop) > 0 {
 		payload["stop"] = append([]string(nil), stop...)
 	}
@@ -355,6 +357,37 @@ func (c *Client) streamPrefix(ctx context.Context, history []core.Message, prefi
 		}
 	}
 	return <-done
+}
+
+func (c *Client) applyChatCompletionsThinking(payload map[string]any, includeDefault bool) {
+	cfg := c.chatCompletionsThinking
+	if cfg == nil {
+		if !includeDefault {
+			return
+		}
+		thinkingType := "disabled"
+		if c.thinkingEnabled {
+			thinkingType = "enabled"
+			if strings.TrimSpace(c.reasoningEffort) != "" {
+				payload["reasoning_effort"] = c.reasoningEffort
+			}
+		}
+		payload["thinking"] = map[string]any{"type": thinkingType}
+		return
+	}
+	if !cfg.Omit {
+		thinkingType := "disabled"
+		if c.thinkingEnabled {
+			thinkingType = cfg.EnabledType
+			if thinkingType == "" {
+				thinkingType = "enabled"
+			}
+		}
+		payload["thinking"] = map[string]any{"type": thinkingType}
+	}
+	if cfg.ReasoningSplit {
+		payload["reasoning_split"] = true
+	}
 }
 
 func (c *Client) prefixCompletionBaseURL() (string, bool) {

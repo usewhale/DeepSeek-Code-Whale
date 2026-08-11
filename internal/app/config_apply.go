@@ -29,6 +29,15 @@ func ApplyLoadedConfig(cfg *Config, loaded LoadedConfig) error {
 }
 
 func ApplyFileConfig(cfg *Config, file FileConfig) error {
+	if strings.TrimSpace(file.Provider) != "" {
+		provider := strings.ToLower(strings.TrimSpace(file.Provider))
+		switch provider {
+		case "deepseek", "minimax":
+			cfg.Provider = provider
+		default:
+			return fmt.Errorf("invalid provider: %s", file.Provider)
+		}
+	}
 	if strings.TrimSpace(file.Model) != "" {
 		cfg.Model = strings.TrimSpace(file.Model)
 	}
@@ -66,6 +75,7 @@ func ApplyFileConfig(cfg *Config, file FileConfig) error {
 	if err := applyMultimodalProviderConfig(cfg, file.Providers.DeepSeek.Multimodal); err != nil {
 		return err
 	}
+	applyMiniMaxProviderConfig(cfg, file.Providers.MiniMax)
 	if strings.TrimSpace(file.Providers.DeepSeek.WebSearch) != "" {
 		mode, err := deepseek.NormalizeWebSearchMode(file.Providers.DeepSeek.WebSearch)
 		if err != nil {
@@ -235,6 +245,9 @@ func overlayExplicitConfig(dst *Config, src Config) {
 		dst.Model = src.Model
 		dst.ModelExplicit = src.ModelExplicit
 	}
+	if strings.TrimSpace(src.Provider) != "" && src.Provider != def.Provider {
+		dst.Provider = strings.ToLower(strings.TrimSpace(src.Provider))
+	}
 	if src.PermissionDefault != "" && src.PermissionDefault != def.PermissionDefault {
 		dst.PermissionDefault = src.PermissionDefault
 	}
@@ -295,6 +308,9 @@ func overlayExplicitConfig(dst *Config, src Config) {
 	}
 	if src.DeepSeekMultimodal != def.DeepSeekMultimodal {
 		dst.DeepSeekMultimodal = normalizeMultimodalProviderConfig(src.DeepSeekMultimodal)
+	}
+	if src.MiniMax != def.MiniMax {
+		dst.MiniMax = normalizeMiniMaxProviderConfig(src.MiniMax)
 	}
 	if src.DeepSeekWebSearch != def.DeepSeekWebSearch {
 		dst.DeepSeekWebSearch = src.DeepSeekWebSearch
@@ -381,6 +397,31 @@ func normalizeMultimodalProviderConfig(in MultimodalProviderConfig) MultimodalPr
 	in.APIKey = strings.TrimSpace(in.APIKey)
 	in.APIKeyEnv = strings.TrimSpace(in.APIKeyEnv)
 	in.Model = strings.TrimSpace(in.Model)
+	return in
+}
+
+func applyMiniMaxProviderConfig(cfg *Config, file FileMiniMaxProviderConfig) {
+	next := cfg.MiniMax
+	if strings.TrimSpace(file.Region) != "" {
+		next.Region = strings.ToLower(strings.TrimSpace(file.Region))
+	}
+	if strings.TrimSpace(file.BaseURL) != "" {
+		next.BaseURL = strings.TrimRight(strings.TrimSpace(file.BaseURL), "/")
+	}
+	if strings.TrimSpace(file.APIKey) != "" {
+		next.APIKey = strings.TrimSpace(file.APIKey)
+	}
+	if strings.TrimSpace(file.APIKeyEnv) != "" {
+		next.APIKeyEnv = strings.TrimSpace(file.APIKeyEnv)
+	}
+	cfg.MiniMax = normalizeMiniMaxProviderConfig(next)
+}
+
+func normalizeMiniMaxProviderConfig(in MiniMaxProviderConfig) MiniMaxProviderConfig {
+	in.Region = strings.ToLower(strings.TrimSpace(in.Region))
+	in.BaseURL = strings.TrimRight(strings.TrimSpace(in.BaseURL), "/")
+	in.APIKey = strings.TrimSpace(in.APIKey)
+	in.APIKeyEnv = strings.TrimSpace(in.APIKeyEnv)
 	return in
 }
 

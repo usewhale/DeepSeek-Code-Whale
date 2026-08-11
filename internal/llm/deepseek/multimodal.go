@@ -58,6 +58,7 @@ func (c *Client) streamMultimodal(ctx context.Context, history []core.Message, t
 		"stream_options": map[string]any{"include_usage": true},
 		"messages":       msgs,
 	}
+	c.applyChatCompletionsThinking(payload, false)
 	if len(tools) > 0 {
 		payload["tools"] = toDeepSeekTools(tools)
 	}
@@ -248,6 +249,13 @@ func encodeOpenAIAttachment(att *core.AttachmentRef) (map[string]any, error) {
 			"input_audio": map[string]any{
 				"data":   encoded,
 				"format": format,
+			},
+		}, nil
+	case core.AttachmentKindVideo:
+		return map[string]any{
+			"type": "video_url",
+			"video_url": map[string]any{
+				"url": dataURL(mime, encoded),
 			},
 		}, nil
 	default:
