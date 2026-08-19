@@ -159,11 +159,11 @@ Whale 仍在快速迭代中。建议先用于个人项目、实验仓库或可�
 
 ## Star History（Star 历史）
 
-<a href="https://www.star-history.com/?repos=usewhale%2FWhale&type=date&legend=top-left">
+<a href="https://star-history.dera.page/#usewhale/Whale&type=date">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=usewhale/Whale&type=date&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=usewhale/Whale&type=date&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=usewhale/Whale&type=date&legend=top-left" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://star-history.dera.page/svg?repos=usewhale/Whale&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://star-history.dera.page/svg?repos=usewhale/Whale&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://star-history.dera.page/svg?repos=usewhale/Whale&type=date&legend=top-left" />
  </picture>
 </a>
 
