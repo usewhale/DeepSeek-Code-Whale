@@ -128,6 +128,16 @@ further with `permissions.default = "deny"` plus explicit `permissions` sections
 }
 ```
 
+### Optional: Parallel Search
+
+To use Parallel Search, explicitly add this separate server. It does not require
+an API key or account. User-provided search objectives, search queries, and
+requested URLs are sent to Parallel.
+
+```json
+{"mcpServers":{"parallel-search":{"type":"http","url":"https://search.parallel.ai/mcp"}}}
+```
+
 `type` can be `http`, `streamable-http`, `streamable_http`, or `streamablehttp`.
 
 Environment variables in config values: use `${NAME}` syntax. Whale fails
