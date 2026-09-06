@@ -142,6 +142,36 @@ If the server requires an API key, prefer environment variables instead of commi
 
 Header values and stdio env values can reference environment variables with `${NAME}`. Whale fails startup for that server if the variable is missing.
 
+## Optional: You.com web search
+
+To use You.com web search, explicitly add this separate server. The `profile=free`
+endpoint needs no API key or account and exposes a basic `you-search` tool.
+
+```json
+{"mcpServers":{"you":{"type":"http","url":"https://api.you.com/mcp?profile=free"}}}
+```
+
+Tools appear in Whale as `mcp__you__you-search` and friends (the server also
+offers web-page content extraction). Search queries and requested URLs are sent
+to You.com.
+
+For the full toolset (advanced filters, news, research tooling), use the
+authenticated endpoint with a You.com API key instead:
+
+```json
+{
+  "mcpServers": {
+    "you": {
+      "type": "http",
+      "url": "https://api.you.com/mcp",
+      "headers": {
+        "Authorization": "Bearer ${YDC_API_KEY}"
+      }
+    }
+  }
+}
+```
+
 ## Optional fields
 
 - `timeout`: startup and call timeout in seconds. Default: `15`.
