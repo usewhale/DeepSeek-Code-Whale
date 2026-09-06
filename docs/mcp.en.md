@@ -128,6 +128,36 @@ further with `permissions.default = "deny"` plus explicit `permissions` sections
 }
 ```
 
+### Optional: You.com web search
+
+To use You.com web search, explicitly add this separate server. The `profile=free`
+endpoint needs no API key or account and exposes a basic `you-search` tool.
+
+```json
+{"mcpServers":{"you":{"type":"http","url":"https://api.you.com/mcp?profile=free"}}}
+```
+
+Tools appear in Whale as `mcp__you__you-search` and friends (the server also
+offers web-page content extraction). Search queries and requested URLs are sent
+to You.com.
+
+For the full toolset (advanced filters, news, research tooling), use the
+authenticated endpoint with a You.com API key instead:
+
+```json
+{
+  "mcpServers": {
+    "you": {
+      "type": "http",
+      "url": "https://api.you.com/mcp",
+      "headers": {
+        "Authorization": "Bearer ${YDC_API_KEY}"
+      }
+    }
+  }
+}
+```
+
 `type` can be `http`, `streamable-http`, `streamable_http`, or `streamablehttp`.
 
 Environment variables in config values: use `${NAME}` syntax. Whale fails
